@@ -1,0 +1,15 @@
+[package]
+name = "krust-agent-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tool framework and MCP compatibility layer for agent capabilities"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+krust-protocol-core = { path = "../protocol-core" }
