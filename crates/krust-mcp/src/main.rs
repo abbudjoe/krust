@@ -171,7 +171,8 @@ impl ExecutionEngine {
                 return (last_content, state);
             }
 
-            if started_at.elapsed() > self.max_wall_clock_budget {
+            let elapsed = started_at.elapsed();
+            if elapsed > self.max_wall_clock_budget {
                 state = AgentState::Failed {
                     reason: format!(
                         "Execution aborted: retry safety wall-clock budget exceeded ({:?})",
@@ -181,10 +182,21 @@ impl ExecutionEngine {
                 return (last_content, state);
             }
 
-            // 3. Execute the tool
-            let execution = match run_tool().await {
-                Ok(execution) => execution,
-                Err(err) => {
+            let remaining_budget = self.max_wall_clock_budget.saturating_sub(elapsed);
+            if remaining_budget.is_zero() {
+                state = AgentState::Failed {
+                    reason: format!(
+                        "Execution aborted: retry safety wall-clock budget exhausted ({:?})",
+                        self.max_wall_clock_budget
+                    ),
+                };
+                return (last_content, state);
+            }
+
+            // 3. Execute the tool with per-attempt wall-clock enforcement.
+            let execution = match tokio::time::timeout(remaining_budget, run_tool()).await {
+                Ok(Ok(execution)) => execution,
+                Ok(Err(err)) => {
                     last_content = err;
 
                     let tool_event = TransitionEvent::ToolCompleted {
@@ -234,6 +246,16 @@ impl ExecutionEngine {
                         }
                         _ => return (last_content.clone(), state),
                     }
+                }
+                Err(_) => {
+                    let timeout_reason = format!(
+                        "Execution aborted: tool attempt timed out after {:?} (remaining wall-clock budget)",
+                        remaining_budget
+                    );
+                    state = AgentState::Failed {
+                        reason: timeout_reason.clone(),
+                    };
+                    return (timeout_reason, state);
                 }
             };
 
@@ -333,6 +355,30 @@ fn required_evidence_contract(kinds: &[&str], description: &str) -> RequiredEvid
     }
 }
 
+fn finalize_execution_result(result: String, state: AgentState) -> String {
+    match state {
+        AgentState::Completed { .. } => result,
+        AgentState::Failed { reason } => {
+            if result.trim().is_empty() || result == reason {
+                format!("Error: {}", reason)
+            } else {
+                format!("Error: {} (last tool output: {})", reason, result)
+            }
+        }
+        AgentState::Cancelled { reason } => format!("Error: execution cancelled: {}", reason),
+        other => {
+            if result.trim().is_empty() {
+                format!("Error: execution ended in unexpected state: {:?}", other)
+            } else {
+                format!(
+                    "Error: execution ended in unexpected state: {:?} (last tool output: {})",
+                    other, result
+                )
+            }
+        }
+    }
+}
+
 // --- Request schemas ---
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -429,7 +475,7 @@ impl KrustServer {
         let url = req.url.clone();
         let contract = required_evidence_contract(&["page_loaded"], "Page must be loaded");
 
-        let (result, _state) = self
+        let (result, state) = self
             .engine
             .execute(&intent, &format!("web_navigate_{}", step), step, Some(&contract), || async {
                 match backend.execute(WebAction::Navigate { url: url.clone() }).await {
@@ -449,7 +495,7 @@ impl KrustServer {
             })
             .await;
 
-        result
+        finalize_execution_result(result, state)
     }
 
     #[tool(description = "Click an element on the page by CSS selector.")]
@@ -465,7 +511,7 @@ impl KrustServer {
         let selector = req.selector.clone();
         let contract = required_evidence_contract(&["element_clicked"], "Click evidence required");
 
-        let (result, _state) = self
+        let (result, state) = self
             .engine
             .execute(
                 &intent,
@@ -492,7 +538,7 @@ impl KrustServer {
             )
             .await;
 
-        result
+        finalize_execution_result(result, state)
     }
 
     #[tool(description = "Type text into an input element by CSS selector.")]
@@ -510,7 +556,7 @@ impl KrustServer {
         let text = req.text.clone();
         let contract = required_evidence_contract(&["text_typed"], "Type evidence required");
 
-        let (result, _state) = self
+        let (result, state) = self
             .engine
             .execute(
                 &intent,
@@ -538,7 +584,7 @@ impl KrustServer {
             )
             .await;
 
-        result
+        finalize_execution_result(result, state)
     }
 
     #[tool(description = "Take a screenshot of the current page. Returns base64-encoded PNG.")]
@@ -553,7 +599,7 @@ impl KrustServer {
         let contract =
             required_evidence_contract(&["screenshot"], "Screenshot capture evidence required");
 
-        let (result, _state) = self
+        let (result, state) = self
             .engine
             .execute(
                 &intent,
@@ -585,7 +631,7 @@ impl KrustServer {
             )
             .await;
 
-        result
+        finalize_execution_result(result, state)
     }
 
     #[tool(description = "Extract text content from the page or a specific element.")]
@@ -601,7 +647,7 @@ impl KrustServer {
         let contract =
             required_evidence_contract(&["text_content"], "Text extraction evidence required");
 
-        let (result, _state) = self
+        let (result, state) = self
             .engine
             .execute(
                 &intent,
@@ -641,7 +687,7 @@ impl KrustServer {
             )
             .await;
 
-        result
+        finalize_execution_result(result, state)
     }
 
     #[tool(
@@ -659,7 +705,7 @@ impl KrustServer {
         let contract =
             required_evidence_contract(&["wait_completed"], "Wait completion evidence required");
 
-        let (result, _state) = self
+        let (result, state) = self
             .engine
             .execute(
                 &intent,
@@ -687,7 +733,7 @@ impl KrustServer {
             )
             .await;
 
-        result
+        finalize_execution_result(result, state)
     }
 }
 
@@ -993,6 +1039,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_engine_wall_clock_budget_preempts_hung_tool_attempt() {
+        let engine = ExecutionEngine::with_limits(
+            vec![Box::new(AllowAllPolicy)],
+            16,
+            Duration::from_millis(50),
+        );
+        let intent = Intent::new("web.wait");
+
+        let (result, state) = tokio::time::timeout(
+            Duration::from_secs(1),
+            engine.execute(&intent, "tc_hung", 1, None, || async {
+                std::future::pending::<Result<ToolExecution, String>>().await
+            }),
+        )
+        .await
+        .expect("hung tool attempt should be preempted by wall-clock timeout");
+
+        assert!(result.contains("tool attempt timed out"));
+        match state {
+            AgentState::Failed { reason } => {
+                assert!(reason.contains("tool attempt timed out"));
+            }
+            _ => panic!("Expected Failed, got {:?}", state),
+        }
+    }
+
+    #[test]
+    fn test_finalize_execution_result_surfaces_failed_state_details() {
+        let rendered = finalize_execution_result(
+            "backend failure payload".to_string(),
+            AgentState::Failed {
+                reason: "verification failed".to_string(),
+            },
+        );
+
+        assert!(rendered.contains("verification failed"));
+        assert!(rendered.contains("backend failure payload"));
+    }
+
+    #[tokio::test]
     async fn test_mcp_list_tools_exposes_expected_tools() {
         let (server_transport, client_transport) = tokio::io::duplex(4096);
 
@@ -1114,7 +1200,12 @@ mod tests {
         match err {
             ServiceError::McpError(error) => {
                 assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
-                assert_eq!(error.message, "tool not found");
+                assert!(
+                    error
+                        .message
+                        .to_ascii_lowercase()
+                        .contains("tool not found")
+                );
                 assert!(error.data.is_none());
             }
             other => panic!("Expected MCP error, got {:?}", other),
