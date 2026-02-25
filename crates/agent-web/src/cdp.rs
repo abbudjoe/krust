@@ -34,11 +34,80 @@ impl CdpBackend {
         }
     }
 
-    /// Launch a headless Chrome instance.
+    /// Launch a Chrome instance.
+    ///
+    /// Respects environment variables:
+    /// - `CHROME_PATH`: explicit path to Chrome/Chromium binary
+    /// - `KRUST_HEADLESS`: set to "false" to show browser window (default: true)
+    /// - `KRUST_WINDOW_WIDTH`: browser width (default: 1280)
+    /// - `KRUST_WINDOW_HEIGHT`: browser height (default: 720)
     pub async fn launch(&self) -> Result<(), WebError> {
-        let config = BrowserConfig::builder()
+        let headless = std::env::var("KRUST_HEADLESS")
+            .map(|v| v != "false")
+            .unwrap_or(true);
+        let width: u32 = std::env::var("KRUST_WINDOW_WIDTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1280);
+        let height: u32 = std::env::var("KRUST_WINDOW_HEIGHT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(720);
+
+        let mut builder = BrowserConfig::builder()
             .no_sandbox()
-            .window_size(1280, 720)
+            .window_size(width, height);
+
+        // Set Chrome path from env if provided
+        if let Ok(chrome_path) = std::env::var("CHROME_PATH") {
+            tracing::info!("Using Chrome from CHROME_PATH: {}", chrome_path);
+            builder = builder.chrome_executable(chrome_path);
+        } else {
+            // Try to find Chrome and report helpful error if not found
+            let candidates = if cfg!(target_os = "macos") {
+                vec![
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                ]
+            } else {
+                vec![
+                    "google-chrome",
+                    "google-chrome-stable",
+                    "chromium-browser",
+                    "chromium",
+                    "/usr/bin/google-chrome",
+                    "/usr/bin/chromium-browser",
+                    "/usr/bin/chromium",
+                ]
+            };
+
+            let found = candidates
+                .iter()
+                .find(|c| std::path::Path::new(c).exists() || which::which(c).is_ok());
+
+            match found {
+                Some(path) => {
+                    tracing::info!("Auto-detected Chrome at: {}", path);
+                    builder = builder.chrome_executable(*path);
+                }
+                None => {
+                    let msg = format!(
+                        "Chrome/Chromium not found. Searched: {:?}\n\
+                         Set the CHROME_PATH environment variable to your Chrome binary.\n\
+                         Example: CHROME_PATH=\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\"",
+                        candidates
+                    );
+                    tracing::error!("{}", msg);
+                    return Err(WebError::Other(msg));
+                }
+            }
+        }
+
+        if !headless {
+            builder = builder.with_head();
+        }
+
+        let config = builder
             .build()
             .map_err(|e| WebError::Other(format!("Browser config error: {}", e)))?;
 

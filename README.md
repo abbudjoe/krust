@@ -2,7 +2,103 @@
 
 **Verified execution protocols for AI agents.**
 
-A Rust toolkit that makes agent actions deterministic, observable, and recoverable.
+A Rust toolkit that makes agent actions deterministic, observable, and recoverable. Plug it into any MCP-compatible agent (Claude Code, Codex, Cursor) and get state-machine-backed browser automation with evidence verification out of the box.
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- **Rust** (1.70+): [rustup.rs](https://rustup.rs)
+- **Chrome or Chromium** installed (the MCP server controls it via CDP)
+
+### Build
+
+```bash
+git clone https://github.com/abbudjoe/krust.git
+cd krust
+cargo build --release --bin krust-mcp
+```
+
+The binary lands at `target/release/krust-mcp`.
+
+### Configure with Claude Code
+
+Add to `~/.claude/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "krust": {
+      "command": "/path/to/krust-mcp",
+      "env": {
+        "CHROME_PATH": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+      }
+    }
+  }
+}
+```
+
+Then restart Claude Code and run `/mcp` to verify krust is connected.
+
+### Configure with Codex
+
+Add to your MCP config (check Codex docs for location):
+
+```json
+{
+  "mcpServers": {
+    "krust": {
+      "command": "/path/to/krust-mcp"
+    }
+  }
+}
+```
+
+### Configure with Cursor
+
+In Cursor Settings → MCP, add a new server:
+- **Name**: krust
+- **Command**: `/path/to/krust-mcp`
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CHROME_PATH` | auto-detect | Path to Chrome/Chromium binary |
+| `KRUST_HEADLESS` | `true` | Set to `false` to show the browser window |
+| `KRUST_LOG` | `info` | Log level: `error`, `warn`, `info`, `debug`, `trace` |
+| `KRUST_WINDOW_WIDTH` | `1280` | Browser window width |
+| `KRUST_WINDOW_HEIGHT` | `720` | Browser window height |
+
+### Verify Installation
+
+Test that the binary works before configuring your agent:
+
+```bash
+# Should print server info and exit cleanly (Ctrl+C to stop)
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"clientInfo":{"name":"test","version":"1.0"},"protocolVersion":"2024-11-05"}}' | ./target/release/krust-mcp 2>/dev/null
+```
+
+If Chrome isn't found, the server will print an error to stderr explaining how to set `CHROME_PATH`.
+
+### Troubleshooting
+
+**"krust not showing in /mcp"**
+- Make sure the path to the binary is absolute (not relative)
+- Restart Claude Code after editing `mcp.json`
+- Check stderr: `./target/release/krust-mcp 2>&1 | head`
+
+**"Browser launch failed"**
+- Set `CHROME_PATH` to your Chrome binary explicitly
+- macOS: `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
+- Linux: `/usr/bin/google-chrome` or `/usr/bin/chromium-browser`
+- Verify Chrome works: `"$CHROME_PATH" --headless --dump-dom https://example.com`
+
+**"Connection refused" / timeout errors**
+- Chrome might already be running with `--remote-debugging-port`. Close it first.
+- Try `KRUST_HEADLESS=false` to see what the browser is doing
 
 ---
 
@@ -17,6 +113,21 @@ Krust is the open-source protocol layer that fixes this. It provides:
 - **A policy engine** that gates sensitive actions with allow/deny/confirm decisions
 - **Checkpoint/resume** for durable execution that survives crashes and restarts
 - **A web interaction layer** with pluggable backends (CDP, accessibility APIs, native browsers)
+
+## Available Tools
+
+When connected via MCP, your agent gets these tools:
+
+| Tool | Description |
+|------|-------------|
+| `web_navigate` | Navigate to a URL |
+| `web_click` | Click an element by CSS selector |
+| `web_type` | Type text into an input element |
+| `web_extract` | Extract text from the page or a specific element |
+| `web_screenshot` | Take a screenshot of the current page |
+| `web_wait` | Wait for an element to appear or a duration |
+
+Every tool call passes through the Krust state machine: policy check → execute → verify evidence → complete or retry.
 
 ## Architecture
 
@@ -42,36 +153,22 @@ Krust is the open-source protocol layer that fixes this. It provides:
 | `krust-agent-eval` | Evaluation harness and reliability metrics |
 | `krust-mcp` | MCP server binary — point any agent at this |
 
-## Quick Start
+## Development
 
 ```bash
-# Build everything
-cargo build
+# Run all tests
+cargo test --workspace
 
-# Run tests
-cargo test
+# Check for issues
+cargo clippy --workspace -- -D warnings
 
-# Start the MCP server (coming soon)
-cargo run --bin krust-mcp
-```
-
-## Testing with Claude Code / Codex
-
-Krust exposes its tools as an MCP server. Any MCP-compatible agent can use it:
-
-```bash
-# Add to your Claude Code MCP config:
-{
-  "krust": {
-    "command": "cargo",
-    "args": ["run", "--bin", "krust-mcp"]
-  }
-}
+# Format code
+cargo fmt --all
 ```
 
 ## Status
 
-🚧 **Early development.** The protocol-core state machine and type system are taking shape. Agent-web CDP backend and MCP server are next.
+🚧 **Early development.** The protocol core, MCP server, and CDP backend are functional. Under active development.
 
 ## License
 

@@ -597,7 +597,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .init();
 
-    tracing::info!("Starting Krust MCP server");
+    tracing::info!("Krust MCP server v{}", env!("CARGO_PKG_VERSION"));
+    tracing::info!(
+        "Chrome path: {}",
+        std::env::var("CHROME_PATH").unwrap_or_else(|_| "auto-detect".to_string())
+    );
+    tracing::info!(
+        "Headless: {}",
+        std::env::var("KRUST_HEADLESS")
+            .map(|v| v != "false")
+            .unwrap_or(true)
+    );
 
     let server = KrustServer::new();
     let transport = rmcp::transport::io::stdio();
