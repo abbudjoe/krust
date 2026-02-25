@@ -234,7 +234,7 @@ impl Tool for WebScreenshotTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        match self.backend.execute(WebAction::Screenshot).await {
+        match self.backend.execute(WebAction::Screenshot { output_path: None }).await {
             Ok(evidence) => {
                 let content = format!(
                     "Screenshot captured. Current URL: {}",
