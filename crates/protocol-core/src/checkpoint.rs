@@ -3,11 +3,11 @@
 //! Checkpoints capture the full state of an agent task at a point in time,
 //! enabling resume after crash, restart, or transfer between hosts.
 
-use crate::intent::Intent;
-use crate::state::AgentState;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
+use crate::state::AgentState;
+use crate::intent::Intent;
 
 /// A checkpoint capturing the full state of a task execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -28,5 +28,3 @@ rmcp = { version = "0.8", features = ["server", "transport-io"] }
 schemars = "1"
 chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
 futures = "0.3"
-which = "7"
-base64 = "0.22"

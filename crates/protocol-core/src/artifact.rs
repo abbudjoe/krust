@@ -4,8 +4,8 @@
 //! Evidence is the proof that the action actually produced the expected result.
 //! This is the core innovation: agents don't just report success — they prove it.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
 
 /// Evidence that an action produced a result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,13 +46,19 @@ pub trait ArtifactContract: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VerificationResult {
     /// Evidence satisfies the contract. Includes extracted artifacts.
-    Passed { artifacts: Vec<String> },
+    Passed {
+        artifacts: Vec<String>,
+    },
 
     /// Evidence does not satisfy the contract.
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 
     /// Not enough evidence to make a determination.
-    Insufficient { missing: Vec<String> },
+    Insufficient {
+        missing: Vec<String>,
+    },
 }
 
 /// A simple contract that checks whether specific evidence kinds are present.
@@ -120,10 +126,9 @@ mod tests {
             required_kinds: vec!["page_loaded".to_string(), "confirmation_number".to_string()],
             description: "Must have confirmation".to_string(),
         };
-        let evidence = vec![Evidence::new(
-            "page_loaded",
-            json!({"url": "https://example.com"}),
-        )];
+        let evidence = vec![
+            Evidence::new("page_loaded", json!({"url": "https://example.com"})),
+        ];
         match contract.verify(&evidence) {
             VerificationResult::Insufficient { missing } => {
                 assert_eq!(missing, vec!["confirmation_number"]);

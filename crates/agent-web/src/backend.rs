@@ -3,8 +3,8 @@
 //! Each platform implements this trait to provide browser control.
 
 use crate::action::WebAction;
-use crate::evidence::WebEvidence;
 use crate::page::PageSnapshot;
+use crate::evidence::WebEvidence;
 
 /// Trait that browser backends implement.
 ///

@@ -1,8 +1,8 @@
 //! Core tool trait and types.
 
-use krust_protocol_core::artifact::Evidence;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use krust_protocol_core::artifact::Evidence;
 
 /// A call to a specific tool with parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]

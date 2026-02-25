@@ -3,80 +3,19 @@
 //! This backend controls a real Chromium/Chrome browser for desktop
 //! and Linux environments.
 
-use crate::action::{WaitCondition, WebAction};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use chromiumoxide::{Browser, BrowserConfig, Page};
+use futures::StreamExt;
+use crate::action::{WebAction, WaitCondition};
 use crate::backend::{WebBackend, WebError};
 use crate::evidence::WebEvidence;
 use crate::page::PageSnapshot;
-use base64::Engine;
-use chromiumoxide::{Browser, BrowserConfig, Page};
-use futures::StreamExt;
-use std::path::Path;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-
-fn chrome_candidates() -> Vec<&'static str> {
-    if cfg!(target_os = "macos") {
-        vec![
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        ]
-    } else {
-        vec![
-            "google-chrome",
-            "google-chrome-stable",
-            "chromium-browser",
-            "chromium",
-            "/usr/bin/google-chrome",
-            "/usr/bin/chromium-browser",
-            "/usr/bin/chromium",
-        ]
-    }
-}
-
-/// Detect a usable Chrome/Chromium executable path.
-///
-/// Resolution order:
-/// 1. `CHROME_PATH` environment variable
-/// 2. Common executable names/paths for the current OS
-pub fn detect_chrome_path() -> Result<String, WebError> {
-    if let Ok(chrome_path) = std::env::var("CHROME_PATH") {
-        let usable = Path::new(&chrome_path).exists() || which::which(&chrome_path).is_ok();
-        if usable {
-            return Ok(chrome_path);
-        }
-
-        return Err(WebError::Other(format!(
-            "CHROME_PATH is set but not usable: {}\n\
-             Verify the path or set CHROME_PATH to a valid Chrome/Chromium binary.",
-            chrome_path
-        )));
-    }
-
-    let candidates = chrome_candidates();
-    let found = candidates
-        .iter()
-        .find(|c| Path::new(c).exists() || which::which(c).is_ok());
-
-    found.map(|path| (*path).to_string()).ok_or_else(|| {
-        WebError::Other(format!(
-            "Chrome/Chromium not found. Searched: {:?}\n\
-             Set the CHROME_PATH environment variable to your Chrome binary.\n\
-             Example: CHROME_PATH=\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\"",
-            candidates
-        ))
-    })
-}
 
 /// CDP backend wrapping a chromiumoxide browser instance.
 pub struct CdpBackend {
     page: Arc<Mutex<Option<Page>>>,
     browser: Arc<Mutex<Option<Browser>>>,
-}
-
-impl Default for CdpBackend {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl CdpBackend {
@@ -88,43 +27,11 @@ impl CdpBackend {
         }
     }
 
-    /// Launch a Chrome instance.
-    ///
-    /// Respects environment variables:
-    /// - `CHROME_PATH`: explicit path to Chrome/Chromium binary
-    /// - `KRUST_HEADLESS`: set to "false" to show browser window (default: true)
-    /// - `KRUST_WINDOW_WIDTH`: browser width (default: 1280)
-    /// - `KRUST_WINDOW_HEIGHT`: browser height (default: 720)
+    /// Launch a headless Chrome instance.
     pub async fn launch(&self) -> Result<(), WebError> {
-        let headless = std::env::var("KRUST_HEADLESS")
-            .map(|v| v != "false")
-            .unwrap_or(true);
-        let width: u32 = std::env::var("KRUST_WINDOW_WIDTH")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1280);
-        let height: u32 = std::env::var("KRUST_WINDOW_HEIGHT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(720);
-
-        let mut builder = BrowserConfig::builder()
+        let config = BrowserConfig::builder()
             .no_sandbox()
-            .window_size(width, height);
-
-        let chrome_path = detect_chrome_path()?;
-        if std::env::var("CHROME_PATH").is_ok() {
-            tracing::info!("Using Chrome from CHROME_PATH: {}", chrome_path);
-        } else {
-            tracing::info!("Auto-detected Chrome at: {}", chrome_path);
-        }
-        builder = builder.chrome_executable(chrome_path);
-
-        if !headless {
-            builder = builder.with_head();
-        }
-
-        let config = builder
+            .window_size(1280, 720)
             .build()
             .map_err(|e| WebError::Other(format!("Browser config error: {}", e)))?;
 
@@ -133,7 +40,9 @@ impl CdpBackend {
             .map_err(|e| WebError::Other(format!("Browser launch error: {}", e)))?;
 
         // Spawn the browser event handler
-        tokio::spawn(async move { while let Some(_event) = handler.next().await {} });
+        tokio::spawn(async move {
+            while let Some(_event) = handler.next().await {}
+        });
 
         let page = browser
             .new_page("about:blank")
@@ -148,7 +57,11 @@ impl CdpBackend {
 
     /// Get a reference to the current page, or error if not launched.
     async fn page(&self) -> Result<Page, WebError> {
-        self.page.lock().await.clone().ok_or(WebError::NotConnected)
+        self.page
+            .lock()
+            .await
+            .clone()
+            .ok_or(WebError::NotConnected)
     }
 }
 
@@ -163,14 +76,8 @@ impl WebBackend for CdpBackend {
                     .await
                     .map_err(|e| WebError::NavigationFailed(e.to_string()))?;
 
-                let title = page
-                    .get_title()
-                    .await
-                    .unwrap_or_default()
-                    .unwrap_or_default();
-                let current_url = page
-                    .url()
-                    .await
+                let title = page.get_title().await.unwrap_or_default().unwrap_or_default();
+                let current_url = page.url().await
                     .ok()
                     .flatten()
                     .map(|u| u.to_string())
@@ -189,9 +96,7 @@ impl WebBackend for CdpBackend {
             WebAction::Click { selector } => {
                 page.find_element(&selector)
                     .await
-                    .map_err(|_| WebError::ElementNotFound {
-                        selector: selector.clone(),
-                    })?
+                    .map_err(|_| WebError::ElementNotFound { selector: selector.clone() })?
                     .click()
                     .await
                     .map_err(|e| WebError::Other(format!("Click failed: {}", e)))?;
@@ -209,18 +114,14 @@ impl WebBackend for CdpBackend {
             WebAction::Type { selector, text } => {
                 page.find_element(&selector)
                     .await
-                    .map_err(|_| WebError::ElementNotFound {
-                        selector: selector.clone(),
-                    })?
+                    .map_err(|_| WebError::ElementNotFound { selector: selector.clone() })?
                     .click()
                     .await
                     .map_err(|e| WebError::Other(format!("Focus failed: {}", e)))?;
 
                 page.find_element(&selector)
                     .await
-                    .map_err(|_| WebError::ElementNotFound {
-                        selector: selector.clone(),
-                    })?
+                    .map_err(|_| WebError::ElementNotFound { selector: selector.clone() })?
                     .type_str(&text)
                     .await
                     .map_err(|e| WebError::Other(format!("Type failed: {}", e)))?;
@@ -245,7 +146,12 @@ impl WebBackend for CdpBackend {
                     .await
                     .map_err(|e| WebError::Other(format!("Screenshot failed: {}", e)))?;
 
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                use std::io::Write;
+                let mut b64 = String::new();
+                {
+                    let mut encoder = base64_encode_writer(&mut b64);
+                    encoder.write_all(&bytes).ok();
+                }
 
                 Ok(WebEvidence {
                     action_summary: "Captured screenshot".to_string(),
@@ -259,13 +165,15 @@ impl WebBackend for CdpBackend {
 
             WebAction::Extract { selector } => {
                 let text = if let Some(sel) = selector {
-                    let el =
-                        page.find_element(&sel)
-                            .await
-                            .map_err(|_| WebError::ElementNotFound {
-                                selector: sel.clone(),
-                            })?;
-                    el.inner_text().await.ok().flatten().unwrap_or_default()
+                    let el = page
+                        .find_element(&sel)
+                        .await
+                        .map_err(|_| WebError::ElementNotFound { selector: sel.clone() })?;
+                    el.inner_text()
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default()
                 } else {
                     // Extract full page text via JS
                     page.evaluate("document.body.innerText")
@@ -288,23 +196,9 @@ impl WebBackend for CdpBackend {
             WebAction::Wait { condition } => {
                 match condition {
                     WaitCondition::Selector(sel) => {
-                        const INITIAL_POLL_MS: u64 = 200;
-                        const MAX_POLL_MS: u64 = 2_000;
-                        const TIMEOUT_MS: u64 = 30_000;
-                        let deadline = tokio::time::Instant::now()
-                            + tokio::time::Duration::from_millis(TIMEOUT_MS);
-                        let mut poll_ms = INITIAL_POLL_MS;
-
-                        loop {
-                            if page.find_element(&sel).await.is_ok() {
-                                break;
-                            }
-                            if tokio::time::Instant::now() >= deadline {
-                                return Err(WebError::Timeout { ms: TIMEOUT_MS });
-                            }
-                            tokio::time::sleep(tokio::time::Duration::from_millis(poll_ms)).await;
-                            poll_ms = (poll_ms * 2).min(MAX_POLL_MS);
-                        }
+                        page.find_element(&sel)
+                            .await
+                            .map_err(|_| WebError::Timeout { ms: 30000 })?;
                     }
                     WaitCondition::Navigation => {
                         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
@@ -325,9 +219,9 @@ impl WebBackend for CdpBackend {
             }
 
             WebAction::Back => {
-                page.evaluate("history.back()")
+                page.execute(chromiumoxide::cdp::browser_protocol::page::NavigateToHistoryEntryParams::new(-1))
                     .await
-                    .map_err(|e| WebError::Other(format!("Back navigation failed: {}", e)))?;
+                    .ok();
                 Ok(WebEvidence {
                     action_summary: "Navigated back".to_string(),
                     url: page.url().await.ok().flatten().map(|u| u.to_string()),
@@ -339,9 +233,9 @@ impl WebBackend for CdpBackend {
             }
 
             WebAction::Forward => {
-                page.evaluate("history.forward()")
+                page.execute(chromiumoxide::cdp::browser_protocol::page::NavigateToHistoryEntryParams::new(1))
                     .await
-                    .map_err(|e| WebError::Other(format!("Forward navigation failed: {}", e)))?;
+                    .ok();
                 Ok(WebEvidence {
                     action_summary: "Navigated forward".to_string(),
                     url: page.url().await.ok().flatten().map(|u| u.to_string()),
@@ -357,18 +251,8 @@ impl WebBackend for CdpBackend {
     async fn snapshot(&self) -> Result<PageSnapshot, WebError> {
         let page = self.page().await?;
 
-        let url = page
-            .url()
-            .await
-            .ok()
-            .flatten()
-            .map(|u| u.to_string())
-            .unwrap_or_default();
-        let title = page
-            .get_title()
-            .await
-            .unwrap_or_default()
-            .unwrap_or_default();
+        let url = page.url().await.ok().flatten().map(|u| u.to_string()).unwrap_or_default();
+        let title = page.get_title().await.unwrap_or_default().unwrap_or_default();
 
         // Basic page snapshot — will be enriched with DOM parsing later
         Ok(PageSnapshot {
@@ -380,5 +264,44 @@ impl WebBackend for CdpBackend {
 
     async fn is_ready(&self) -> bool {
         self.page.lock().await.is_some()
+    }
+}
+
+// Simple base64 encoding (avoid pulling in another crate for now)
+fn base64_encode_writer(output: &mut String) -> Base64Writer<'_> {
+    Base64Writer { output }
+}
+
+struct Base64Writer<'a> {
+    output: &'a mut String,
+}
+
+impl<'a> std::io::Write for Base64Writer<'a> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // Simple base64 - in production use the `base64` crate
+        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for chunk in buf.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+            let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+            let n = (b0 << 16) | (b1 << 8) | b2;
+            self.output.push(CHARS[((n >> 18) & 63) as usize] as char);
+            self.output.push(CHARS[((n >> 12) & 63) as usize] as char);
+            if chunk.len() > 1 {
+                self.output.push(CHARS[((n >> 6) & 63) as usize] as char);
+            } else {
+                self.output.push('=');
+            }
+            if chunk.len() > 2 {
+                self.output.push(CHARS[(n & 63) as usize] as char);
+            } else {
+                self.output.push('=');
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }

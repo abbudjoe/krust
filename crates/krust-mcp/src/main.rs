@@ -8,272 +8,17 @@
 //!
 //! Then configure your agent's MCP settings to point at this binary.
 
-use krust_agent_web::action::{WaitCondition, WebAction};
-use krust_agent_web::backend::WebBackend;
-use krust_agent_web::cdp::{detect_chrome_path, CdpBackend};
-use krust_protocol_core::artifact::{
-    ArtifactContract, Evidence, RequiredEvidenceContract, VerificationResult,
-};
-use krust_protocol_core::intent::Intent;
-use krust_protocol_core::policy::{
-    evaluate_policies, AllowAllPolicy, ConfirmPatternPolicy, Policy, PolicyDecision,
-};
-use krust_protocol_core::state::{apply_transition, AgentState, TransitionEvent};
-use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{
-        CallToolRequestParam, CallToolResult, ListToolsResult, PaginatedRequestParam,
-        ServerCapabilities, ServerInfo,
-    },
-    schemars, tool, tool_router, Error as McpError, RoleServer, ServerHandler, ServiceExt,
-};
-use rmcp::service::RequestContext;
-use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
-// --- Execution Engine ---
-
-/// Orchestrates tool execution through the protocol-core state machine and policy engine.
-struct ExecutionEngine {
-    policies: Vec<Box<dyn Policy>>,
-}
-
-#[derive(Debug, Clone)]
-struct ToolExecution {
-    content: String,
-    evidence: Vec<Evidence>,
-}
-
-impl ToolExecution {
-    fn new(content: impl Into<String>, evidence: Vec<Evidence>) -> Self {
-        Self {
-            content: content.into(),
-            evidence,
-        }
-    }
-}
-
-impl ExecutionEngine {
-    fn new() -> Self {
-        let policies: Vec<Box<dyn Policy>> = vec![
-            Box::new(AllowAllPolicy),
-            Box::new(ConfirmPatternPolicy {
-                // Keep meaningful patterns configured so this policy is not a no-op.
-                // evaluate_policies checks all policies, so this still takes effect even
-                // when AllowAllPolicy appears first.
-                confirm_prefixes: vec!["payment.".to_string(), "email.send".to_string()],
-                deny_prefixes: vec!["danger.".to_string()],
-            }),
-        ];
-        Self { policies }
-    }
-
-    /// Check policy for an intent. Returns the decision.
-    fn check_policy(&self, intent: &Intent) -> PolicyDecision {
-        let refs: Vec<&dyn Policy> = self.policies.iter().map(|p| p.as_ref()).collect();
-        evaluate_policies(&refs, intent)
-    }
-
-    /// Run a tool call through the full state machine lifecycle.
-    /// Returns (result_string, final_state).
-    async fn execute<F, Fut>(
-        &self,
-        intent: &Intent,
-        tool_call_id: &str,
-        step: u32,
-        contract: Option<&dyn ArtifactContract>,
-        mut run_tool: F,
-    ) -> (String, AgentState)
-    where
-        F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<ToolExecution, String>>,
-    {
-        // 1. Check policy
-        match self.check_policy(intent) {
-            PolicyDecision::Allow => {}
-            PolicyDecision::Deny { reason } => {
-                return (
-                    format!("Policy denied: {}", reason),
-                    AgentState::Failed { reason },
-                );
-            }
-            PolicyDecision::Confirm { reason } => {
-                // In a real system we'd enter WaitingHuman. For now, log and proceed.
-                tracing::info!("Policy would require confirmation: {}", reason);
-            }
-        }
-
-        // 2. Transition: Planning → Executing
-        let mut state = AgentState::Planning;
-        let plan_event = TransitionEvent::PlanReady {
-            tool_call_id: tool_call_id.to_string(),
-            step,
-        };
-        state = match apply_transition(&state, &plan_event) {
-            Some(s) => s,
-            None => {
-                return (
-                    "Internal error: invalid Planning→Executing transition".to_string(),
-                    state,
-                );
-            }
-        };
-
-        let mut last_content: Option<String> = None;
-
-        loop {
-            // 3. Execute the tool
-            let execution = match run_tool().await {
-                Ok(execution) => execution,
-                Err(err) => {
-                    last_content = Some(err.clone());
-
-                    let tool_event = TransitionEvent::ToolCompleted {
-                        tool_call_id: tool_call_id.to_string(),
-                        success: false,
-                    };
-                    state = match apply_transition(&state, &tool_event) {
-                        Some(s) => s,
-                        None => return (last_content.unwrap_or_default(), state),
-                    };
-
-                    match &state {
-                        AgentState::Retrying {
-                            attempt,
-                            max_attempts,
-                            ..
-                        } => {
-                            if *attempt >= *max_attempts {
-                                let exhausted = TransitionEvent::RetriesExhausted {
-                                    reason: format!(
-                                        "Tool failed after {} attempts: {}",
-                                        *max_attempts + 1,
-                                        last_content.clone().unwrap_or_default()
-                                    ),
-                                };
-                                state = apply_transition(&state, &exhausted).unwrap_or(state);
-                                return (last_content.unwrap_or_default(), state);
-                            }
-
-                            let retry = TransitionEvent::RetryRequested {
-                                max_attempts: *max_attempts,
-                            };
-                            state = match apply_transition(&state, &retry) {
-                                Some(s) => s,
-                                None => {
-                                    let exhausted = TransitionEvent::RetriesExhausted {
-                                        reason: format!(
-                                            "Tool failed after retries exhausted: {}",
-                                            last_content.clone().unwrap_or_default()
-                                        ),
-                                    };
-                                    state = apply_transition(&state, &exhausted).unwrap_or(state);
-                                    return (last_content.unwrap_or_default(), state);
-                                }
-                            };
-                            continue;
-                        }
-                        _ => return (last_content.unwrap_or_default(), state),
-                    }
-                }
-            };
-
-            last_content = Some(execution.content.clone());
-
-            // 4. Transition: Executing → Verifying
-            let tool_event = TransitionEvent::ToolCompleted {
-                tool_call_id: tool_call_id.to_string(),
-                success: true,
-            };
-            state = match apply_transition(&state, &tool_event) {
-                Some(s) => s,
-                None => return (last_content.unwrap_or_default(), state),
-            };
-
-            // 5. Verify artifacts
-            let verification_result = if let Some(contract) = contract {
-                contract.verify(&execution.evidence)
-            } else {
-                VerificationResult::Passed {
-                    artifacts: vec![execution.content.clone()],
-                }
-            };
-
-            match verification_result {
-                VerificationResult::Passed { artifacts } => {
-                    let verify_event = TransitionEvent::VerificationPassed { artifacts };
-                    state = apply_transition(&state, &verify_event).unwrap_or(state);
-                    return (last_content.unwrap_or_default(), state);
-                }
-                VerificationResult::Failed { reason } => {
-                    let verify_event = TransitionEvent::VerificationFailed {
-                        reason: format!("Artifact verification failed: {}", reason),
-                    };
-                    state = match apply_transition(&state, &verify_event) {
-                        Some(s) => s,
-                        None => return (last_content.unwrap_or_default(), state),
-                    };
-                }
-                VerificationResult::Insufficient { missing } => {
-                    let verify_event = TransitionEvent::VerificationFailed {
-                        reason: format!(
-                            "Artifact verification insufficient evidence: {:?}",
-                            missing
-                        ),
-                    };
-                    state = match apply_transition(&state, &verify_event) {
-                        Some(s) => s,
-                        None => return (last_content.unwrap_or_default(), state),
-                    };
-                }
-            }
-
-            // 6. Retry loop after verification failure
-            match &state {
-                AgentState::Retrying {
-                    attempt,
-                    max_attempts,
-                    ..
-                } => {
-                    if *attempt >= *max_attempts {
-                        let exhausted = TransitionEvent::RetriesExhausted {
-                            reason: format!(
-                                "Verification failed after {} attempts",
-                                *max_attempts + 1
-                            ),
-                        };
-                        state = apply_transition(&state, &exhausted).unwrap_or(state);
-                        return (last_content.unwrap_or_default(), state);
-                    }
-
-                    let retry = TransitionEvent::RetryRequested {
-                        max_attempts: *max_attempts,
-                    };
-                    state = match apply_transition(&state, &retry) {
-                        Some(s) => s,
-                        None => {
-                            let exhausted = TransitionEvent::RetriesExhausted {
-                                reason: "Retry transition invalid after verification failure"
-                                    .to_string(),
-                            };
-                            state = apply_transition(&state, &exhausted).unwrap_or(state);
-                            return (last_content.unwrap_or_default(), state);
-                        }
-                    };
-                }
-                _ => return (last_content.unwrap_or_default(), state),
-            }
-        }
-    }
-}
-
-fn required_evidence_contract(kinds: &[&str], description: &str) -> RequiredEvidenceContract {
-    RequiredEvidenceContract {
-        required_kinds: kinds.iter().map(|k| (*k).to_string()).collect(),
-        description: description.to_string(),
-    }
-}
+use rmcp::{
+    ServerHandler, ServiceExt,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::{ServerCapabilities, ServerInfo},
+    schemars, tool, tool_router,
+};
+use krust_agent_web::cdp::CdpBackend;
+use krust_agent_web::backend::WebBackend;
+use krust_agent_web::action::{WebAction, WaitCondition};
 
 // --- Request schemas ---
 
@@ -304,9 +49,6 @@ struct ExtractRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct ScreenshotRequest {}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct WaitRequest {
     #[schemars(description = "CSS selector to wait for, or milliseconds as a number string")]
     condition: String,
@@ -318,9 +60,6 @@ struct WaitRequest {
 struct KrustServer {
     backend: Arc<CdpBackend>,
     launched: Arc<Mutex<bool>>,
-    engine: Arc<ExecutionEngine>,
-    step_counter: Arc<Mutex<u32>>,
-    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
@@ -335,8 +74,6 @@ impl KrustServer {
         Self {
             backend: Arc::new(CdpBackend::new()),
             launched: Arc::new(Mutex::new(false)),
-            engine: Arc::new(ExecutionEngine::new()),
-            step_counter: Arc::new(Mutex::new(0)),
             tool_router: Self::tool_router(),
         }
     }
@@ -349,12 +86,6 @@ impl KrustServer {
         }
         Ok(())
     }
-
-    async fn next_step(&self) -> u32 {
-        let mut counter = self.step_counter.lock().await;
-        *counter += 1;
-        *counter
-    }
 }
 
 #[tool_router]
@@ -365,33 +96,14 @@ impl KrustServer {
             return format!("Error: Browser launch failed: {}", e);
         }
 
-        let intent = Intent::new("web.navigate").with_param("url", serde_json::json!(&req.url));
-        let step = self.next_step().await;
-        let backend = self.backend.clone();
-        let url = req.url.clone();
-        let contract = required_evidence_contract(&["page_loaded"], "Page must be loaded");
-
-        let (result, _state) = self
-            .engine
-            .execute(&intent, &format!("web_navigate_{}", step), step, Some(&contract), || async {
-                match backend.execute(WebAction::Navigate { url: url.clone() }).await {
-                    Ok(evidence) => Ok(ToolExecution::new(
-                        format!(
-                            "Navigated to {}. Title: {}",
-                            evidence.url.as_deref().unwrap_or(&url),
-                            evidence.text_content.as_deref().unwrap_or("(none)")
-                        ),
-                        vec![Evidence::new(
-                            "page_loaded",
-                            serde_json::json!({"url": evidence.url, "title": evidence.text_content}),
-                        )],
-                    )),
-                    Err(e) => Err(format!("Navigation failed: {}", e)),
-                }
-            })
-            .await;
-
-        result
+        match self.backend.execute(WebAction::Navigate { url: req.url.clone() }).await {
+            Ok(evidence) => format!(
+                "Navigated to {}. Title: {}",
+                evidence.url.as_deref().unwrap_or(&req.url),
+                evidence.text_content.as_deref().unwrap_or("(none)")
+            ),
+            Err(e) => format!("Navigation failed: {}", e),
+        }
     }
 
     #[tool(description = "Click an element on the page by CSS selector.")]
@@ -400,41 +112,10 @@ impl KrustServer {
             return format!("Error: Browser launch failed: {}", e);
         }
 
-        let intent =
-            Intent::new("web.click").with_param("selector", serde_json::json!(&req.selector));
-        let step = self.next_step().await;
-        let backend = self.backend.clone();
-        let selector = req.selector.clone();
-        let contract = required_evidence_contract(&["element_clicked"], "Click evidence required");
-
-        let (result, _state) = self
-            .engine
-            .execute(
-                &intent,
-                &format!("web_click_{}", step),
-                step,
-                Some(&contract),
-                || async {
-                    match backend
-                        .execute(WebAction::Click {
-                            selector: selector.clone(),
-                        })
-                        .await
-                    {
-                        Ok(evidence) => Ok(ToolExecution::new(
-                            format!("Clicked element: {}", selector),
-                            vec![Evidence::new(
-                                "element_clicked",
-                                serde_json::json!({"selector": selector, "url": evidence.url}),
-                            )],
-                        )),
-                        Err(e) => Err(format!("Click failed: {}", e)),
-                    }
-                },
-            )
-            .await;
-
-        result
+        match self.backend.execute(WebAction::Click { selector: req.selector.clone() }).await {
+            Ok(_) => format!("Clicked element: {}", req.selector),
+            Err(e) => format!("Click failed: {}", e),
+        }
     }
 
     #[tool(description = "Type text into an input element by CSS selector.")]
@@ -443,91 +124,13 @@ impl KrustServer {
             return format!("Error: Browser launch failed: {}", e);
         }
 
-        let intent = Intent::new("web.type")
-            .with_param("selector", serde_json::json!(&req.selector))
-            .with_param("text", serde_json::json!(&req.text));
-        let step = self.next_step().await;
-        let backend = self.backend.clone();
-        let selector = req.selector.clone();
-        let text = req.text.clone();
-        let contract = required_evidence_contract(&["text_typed"], "Type evidence required");
-
-        let (result, _state) = self
-            .engine
-            .execute(
-                &intent,
-                &format!("web_type_{}", step),
-                step,
-                Some(&contract),
-                || async {
-                    match backend
-                        .execute(WebAction::Type {
-                            selector: selector.clone(),
-                            text: text.clone(),
-                        })
-                        .await
-                    {
-                        Ok(_evidence) => Ok(ToolExecution::new(
-                            format!("Typed '{}' into {}", text, selector),
-                            vec![Evidence::new(
-                                "text_typed",
-                                serde_json::json!({"selector": selector, "text": text}),
-                            )],
-                        )),
-                        Err(e) => Err(format!("Type failed: {}", e)),
-                    }
-                },
-            )
-            .await;
-
-        result
-    }
-
-    #[tool(description = "Take a screenshot of the current page. Returns base64-encoded PNG.")]
-    async fn web_screenshot(&self, Parameters(_req): Parameters<ScreenshotRequest>) -> String {
-        if let Err(e) = self.ensure_browser().await {
-            return format!("Error: Browser launch failed: {}", e);
+        match self.backend.execute(WebAction::Type {
+            selector: req.selector.clone(),
+            text: req.text.clone(),
+        }).await {
+            Ok(_) => format!("Typed '{}' into {}", req.text, req.selector),
+            Err(e) => format!("Type failed: {}", e),
         }
-
-        let intent = Intent::new("web.screenshot");
-        let step = self.next_step().await;
-        let backend = self.backend.clone();
-        let contract =
-            required_evidence_contract(&["screenshot"], "Screenshot capture evidence required");
-
-        let (result, _state) = self
-            .engine
-            .execute(
-                &intent,
-                &format!("web_screenshot_{}", step),
-                step,
-                Some(&contract),
-                || async {
-                    match backend.execute(WebAction::Screenshot).await {
-                        Ok(evidence) => {
-                            let screenshot = evidence.screenshot.ok_or_else(|| {
-                                "Screenshot failed: backend returned no image data".to_string()
-                            })?;
-
-                            Ok(ToolExecution::new(
-                                screenshot.clone(),
-                                vec![Evidence::new(
-                                    "screenshot",
-                                    serde_json::json!({
-                                        "format": "png",
-                                        "base64_length": screenshot.len(),
-                                        "url": evidence.url,
-                                    }),
-                                )],
-                            ))
-                        }
-                        Err(e) => Err(format!("Screenshot failed: {}", e)),
-                    }
-                },
-            )
-            .await;
-
-        result
     }
 
     #[tool(description = "Extract text content from the page or a specific element.")]
@@ -536,100 +139,35 @@ impl KrustServer {
             return format!("Error: Browser launch failed: {}", e);
         }
 
-        let intent = Intent::new("web.extract");
-        let step = self.next_step().await;
-        let backend = self.backend.clone();
-        let selector = req.selector.clone();
-        let contract =
-            required_evidence_contract(&["text_content"], "Text extraction evidence required");
-
-        let (result, _state) = self
-            .engine
-            .execute(
-                &intent,
-                &format!("web_extract_{}", step),
-                step,
-                Some(&contract),
-                || async {
-                    match backend
-                        .execute(WebAction::Extract {
-                            selector: selector.clone(),
-                        })
-                        .await
-                    {
-                        Ok(evidence) => {
-                            let text = evidence.text_content.unwrap_or_default();
-                            let content = if text.len() > 10000 {
-                                format!(
-                                    "{}... [truncated, {} chars total]",
-                                    &text[..10000],
-                                    text.len()
-                                )
-                            } else {
-                                text.clone()
-                            };
-
-                            Ok(ToolExecution::new(
-                                content,
-                                vec![Evidence::new(
-                                    "text_content",
-                                    serde_json::json!({"length": text.len(), "url": evidence.url}),
-                                )],
-                            ))
-                        }
-                        Err(e) => Err(format!("Extract failed: {}", e)),
-                    }
-                },
-            )
-            .await;
-
-        result
+        match self.backend.execute(WebAction::Extract { selector: req.selector }).await {
+            Ok(evidence) => {
+                let text = evidence.text_content.unwrap_or_default();
+                if text.len() > 10000 {
+                    format!("{}... [truncated, {} chars total]", &text[..10000], text.len())
+                } else {
+                    text
+                }
+            }
+            Err(e) => format!("Extract failed: {}", e),
+        }
     }
 
-    #[tool(
-        description = "Wait for an element to appear (CSS selector) or a fixed duration (milliseconds)."
-    )]
+    #[tool(description = "Wait for an element to appear (CSS selector) or a fixed duration (milliseconds).")]
     async fn web_wait(&self, Parameters(req): Parameters<WaitRequest>) -> String {
         if let Err(e) = self.ensure_browser().await {
             return format!("Error: Browser launch failed: {}", e);
         }
 
-        let intent = Intent::new("web.wait");
-        let step = self.next_step().await;
-        let backend = self.backend.clone();
-        let condition_str = req.condition.clone();
-        let contract =
-            required_evidence_contract(&["wait_completed"], "Wait completion evidence required");
+        let condition = if let Ok(ms) = req.condition.parse::<u64>() {
+            WaitCondition::Duration(ms)
+        } else {
+            WaitCondition::Selector(req.condition.clone())
+        };
 
-        let (result, _state) = self
-            .engine
-            .execute(
-                &intent,
-                &format!("web_wait_{}", step),
-                step,
-                Some(&contract),
-                || async {
-                    let condition = if let Ok(ms) = condition_str.parse::<u64>() {
-                        WaitCondition::Duration(ms)
-                    } else {
-                        WaitCondition::Selector(condition_str.clone())
-                    };
-
-                    match backend.execute(WebAction::Wait { condition }).await {
-                        Ok(_) => Ok(ToolExecution::new(
-                            format!("Wait completed for: {}", condition_str),
-                            vec![Evidence::new(
-                                "wait_completed",
-                                serde_json::json!({"condition": condition_str}),
-                            )],
-                        )),
-                        Err(e) => Err(format!("Wait failed: {}", e)),
-                    }
-                },
-            )
-            .await;
-
-        result
+        match self.backend.execute(WebAction::Wait { condition }).await {
+            Ok(_) => format!("Wait completed for: {}", req.condition),
+            Err(e) => format!("Wait failed: {}", e),
+        }
     }
 }
 
@@ -646,78 +184,16 @@ impl ServerHandler for KrustServer {
             ..Default::default()
         }
     }
-
-    fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParam>,
-        _context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        let tools = self.tool_router.list_all();
-        std::future::ready(Ok(ListToolsResult {
-            tools,
-            next_cursor: None,
-        }))
-    }
-
-    fn call_tool(
-        &self,
-        request: CallToolRequestParam,
-        context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
-        async move {
-            let tool_context =
-                rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-            self.tool_router
-                .call(tool_context)
-                .await
-                .map_err(|e| McpError::internal_error(format!("Tool error: {:?}", e), None))
-        }
-    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
-    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
-        println!("krust-mcp {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
-
-    if args.iter().any(|arg| arg == "--check") {
-        match detect_chrome_path() {
-            Ok(path) => {
-                println!("✅ Chrome detected: {}", path);
-                return Ok(());
-            }
-            Err(err) => {
-                eprintln!("❌ Chrome check failed: {}", err);
-                std::process::exit(1);
-            }
-        }
-    }
-
     // Initialize logging to stderr (MCP uses stdin/stdout for protocol)
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
 
-    tracing::info!("Krust MCP server v{}", env!("CARGO_PKG_VERSION"));
-    tracing::info!(
-        "Headless: {}",
-        std::env::var("KRUST_HEADLESS")
-            .map(|v| v != "false")
-            .unwrap_or(true)
-    );
-
-    match detect_chrome_path() {
-        Ok(path) => tracing::info!("Detected Chrome executable: {}", path),
-        Err(err) => tracing::error!(
-            "Chrome/Chromium was not found at startup: {}. \
-             Set CHROME_PATH to your Chrome/Chromium binary before first browser tool call.",
-            err
-        ),
-    }
+    tracing::info!("Starting Krust MCP server");
 
     let server = KrustServer::new();
     let transport = rmcp::transport::io::stdio();
@@ -728,144 +204,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Krust MCP server shutting down");
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[test]
-    fn test_engine_policy_allows_web_navigate() {
-        let engine = ExecutionEngine::new();
-        let intent =
-            Intent::new("web.navigate").with_param("url", serde_json::json!("https://example.com"));
-        assert_eq!(engine.check_policy(&intent), PolicyDecision::Allow);
-    }
-
-    #[test]
-    fn test_allow_all_does_not_short_circuit_confirm_policy() {
-        let engine = ExecutionEngine {
-            policies: vec![
-                Box::new(AllowAllPolicy),
-                Box::new(ConfirmPatternPolicy {
-                    confirm_prefixes: vec!["payment.".to_string()],
-                    deny_prefixes: vec![],
-                }),
-            ],
-        };
-
-        let intent = Intent::new("payment.submit");
-        match engine.check_policy(&intent) {
-            PolicyDecision::Confirm { .. } => {}
-            other => panic!("Expected Confirm, got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_engine_execute_success_lifecycle() {
-        let engine = ExecutionEngine::new();
-        let intent = Intent::new("web.navigate");
-        let contract = required_evidence_contract(&["page_loaded"], "Page load evidence required");
-
-        let (result, state) = engine
-            .execute(&intent, "tc_test", 1, Some(&contract), || async {
-                Ok(ToolExecution::new(
-                    "Navigated to example.com",
-                    vec![Evidence::new(
-                        "page_loaded",
-                        serde_json::json!({"url": "https://example.com"}),
-                    )],
-                ))
-            })
-            .await;
-
-        assert_eq!(result, "Navigated to example.com");
-        match state {
-            AgentState::Completed { artifacts } => {
-                assert_eq!(artifacts, vec!["page_loaded"]);
-            }
-            _ => panic!("Expected Completed, got {:?}", state),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_engine_execute_retries_until_success() {
-        let engine = ExecutionEngine::new();
-        let intent = Intent::new("web.click");
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let attempts_for_closure = attempts.clone();
-
-        let (result, state) = engine
-            .execute(&intent, "tc_retry", 1, None, move || {
-                let attempts = attempts_for_closure.clone();
-                async move {
-                    let current = attempts.fetch_add(1, Ordering::SeqCst);
-                    if current < 2 {
-                        Err(format!("transient failure {}", current + 1))
-                    } else {
-                        Ok(ToolExecution::new("eventual success", vec![]))
-                    }
-                }
-            })
-            .await;
-
-        assert_eq!(result, "eventual success");
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-        match state {
-            AgentState::Completed { .. } => {}
-            _ => panic!("Expected Completed, got {:?}", state),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_engine_verification_insufficient_retries_and_fails() {
-        let engine = ExecutionEngine::new();
-        let intent = Intent::new("web.extract");
-        let contract = required_evidence_contract(&["text_content"], "Text evidence required");
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let attempts_for_closure = attempts.clone();
-
-        let (result, state) = engine
-            .execute(&intent, "tc_verify", 1, Some(&contract), move || {
-                let attempts = attempts_for_closure.clone();
-                async move {
-                    attempts.fetch_add(1, Ordering::SeqCst);
-                    Ok(ToolExecution::new("extracted", vec![]))
-                }
-            })
-            .await;
-
-        assert_eq!(result, "extracted");
-        assert_eq!(attempts.load(Ordering::SeqCst), 4);
-        match state {
-            AgentState::Failed { reason } => {
-                assert!(reason.contains("Verification failed after"));
-            }
-            _ => panic!("Expected Failed, got {:?}", state),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_engine_policy_deny_blocks_execution() {
-        let engine = ExecutionEngine {
-            policies: vec![Box::new(ConfirmPatternPolicy {
-                confirm_prefixes: vec![],
-                deny_prefixes: vec!["forbidden.".to_string()],
-            })],
-        };
-        let intent = Intent::new("forbidden.action");
-
-        let (result, state) = engine
-            .execute(&intent, "tc_test", 1, None, || async {
-                Ok(ToolExecution::new("should not reach", vec![]))
-            })
-            .await;
-
-        assert!(result.starts_with("Policy denied:"));
-        match state {
-            AgentState::Failed { .. } => {}
-            _ => panic!("Expected Failed, got {:?}", state),
-        }
-    }
 }
