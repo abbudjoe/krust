@@ -1200,12 +1200,10 @@ mod tests {
         match err {
             ServiceError::McpError(error) => {
                 assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
-                assert!(
-                    error
-                        .message
-                        .to_ascii_lowercase()
-                        .contains("tool not found")
-                );
+                assert!(error
+                    .message
+                    .to_ascii_lowercase()
+                    .contains("tool not found"));
                 assert!(error.data.is_none());
             }
             other => panic!("Expected MCP error, got {:?}", other),
