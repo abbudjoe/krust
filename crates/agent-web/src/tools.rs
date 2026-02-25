@@ -3,12 +3,12 @@
 //! These tools wrap agent-web's backend and expose web capabilities
 //! to the tool framework (and thus to MCP).
 
-use std::sync::Arc;
-use serde_json::json;
+use crate::action::WebAction;
+use crate::backend::WebBackend;
 use krust_agent_tools::tool::{Tool, ToolCall, ToolResult};
 use krust_protocol_core::artifact::Evidence;
-use crate::backend::WebBackend;
-use crate::action::WebAction;
+use serde_json::json;
+use std::sync::Arc;
 
 /// Navigate to a URL.
 pub struct WebNavigateTool {
@@ -23,7 +23,9 @@ impl WebNavigateTool {
 
 #[async_trait::async_trait]
 impl Tool for WebNavigateTool {
-    fn name(&self) -> &str { "web_navigate" }
+    fn name(&self) -> &str {
+        "web_navigate"
+    }
 
     fn description(&self) -> &str {
         "Navigate the browser to a URL. Returns the page title and URL after navigation."
@@ -48,18 +50,24 @@ impl Tool for WebNavigateTool {
             None => return ToolResult::error(&call.id, "Missing required parameter: url"),
         };
 
-        match self.backend.execute(WebAction::Navigate { url: url.clone() }).await {
+        match self
+            .backend
+            .execute(WebAction::Navigate { url: url.clone() })
+            .await
+        {
             Ok(evidence) => {
                 let content = format!(
                     "Navigated to {}. Title: {}",
                     evidence.url.as_deref().unwrap_or("unknown"),
                     evidence.text_content.as_deref().unwrap_or("(none)")
                 );
-                ToolResult::success(&call.id, content)
-                    .with_evidence(Evidence::new("page_loaded", json!({
+                ToolResult::success(&call.id, content).with_evidence(Evidence::new(
+                    "page_loaded",
+                    json!({
                         "url": evidence.url,
                         "title": evidence.text_content,
-                    })))
+                    }),
+                ))
             }
             Err(e) => ToolResult::error(&call.id, format!("Navigation failed: {}", e)),
         }
@@ -79,7 +87,9 @@ impl WebClickTool {
 
 #[async_trait::async_trait]
 impl Tool for WebClickTool {
-    fn name(&self) -> &str { "web_click" }
+    fn name(&self) -> &str {
+        "web_click"
+    }
 
     fn description(&self) -> &str {
         "Click an element on the page by CSS selector."
@@ -104,14 +114,21 @@ impl Tool for WebClickTool {
             None => return ToolResult::error(&call.id, "Missing required parameter: selector"),
         };
 
-        match self.backend.execute(WebAction::Click { selector: selector.clone() }).await {
-            Ok(evidence) => {
-                ToolResult::success(&call.id, format!("Clicked element: {}", selector))
-                    .with_evidence(Evidence::new("element_clicked", json!({
+        match self
+            .backend
+            .execute(WebAction::Click {
+                selector: selector.clone(),
+            })
+            .await
+        {
+            Ok(evidence) => ToolResult::success(&call.id, format!("Clicked element: {}", selector))
+                .with_evidence(Evidence::new(
+                    "element_clicked",
+                    json!({
                         "selector": selector,
                         "url_after": evidence.url,
-                    })))
-            }
+                    }),
+                )),
             Err(e) => ToolResult::error(&call.id, format!("Click failed: {}", e)),
         }
     }
@@ -130,7 +147,9 @@ impl WebTypeTool {
 
 #[async_trait::async_trait]
 impl Tool for WebTypeTool {
-    fn name(&self) -> &str { "web_type" }
+    fn name(&self) -> &str {
+        "web_type"
+    }
 
     fn description(&self) -> &str {
         "Type text into an input element identified by CSS selector."
@@ -163,13 +182,23 @@ impl Tool for WebTypeTool {
             None => return ToolResult::error(&call.id, "Missing required parameter: text"),
         };
 
-        match self.backend.execute(WebAction::Type { selector: selector.clone(), text: text.clone() }).await {
+        match self
+            .backend
+            .execute(WebAction::Type {
+                selector: selector.clone(),
+                text: text.clone(),
+            })
+            .await
+        {
             Ok(_evidence) => {
                 ToolResult::success(&call.id, format!("Typed '{}' into {}", text, selector))
-                    .with_evidence(Evidence::new("text_typed", json!({
-                        "selector": selector,
-                        "text": text,
-                    })))
+                    .with_evidence(Evidence::new(
+                        "text_typed",
+                        json!({
+                            "selector": selector,
+                            "text": text,
+                        }),
+                    ))
             }
             Err(e) => ToolResult::error(&call.id, format!("Type failed: {}", e)),
         }
@@ -189,7 +218,9 @@ impl WebScreenshotTool {
 
 #[async_trait::async_trait]
 impl Tool for WebScreenshotTool {
-    fn name(&self) -> &str { "web_screenshot" }
+    fn name(&self) -> &str {
+        "web_screenshot"
+    }
 
     fn description(&self) -> &str {
         "Take a screenshot of the current browser page."
@@ -211,10 +242,13 @@ impl Tool for WebScreenshotTool {
                 );
                 let mut result = ToolResult::success(&call.id, content);
                 if let Some(b64) = &evidence.screenshot {
-                    result = result.with_evidence(Evidence::new("screenshot", json!({
-                        "format": "png",
-                        "base64_length": b64.len(),
-                    })));
+                    result = result.with_evidence(Evidence::new(
+                        "screenshot",
+                        json!({
+                            "format": "png",
+                            "base64_length": b64.len(),
+                        }),
+                    ));
                 }
                 result
             }
@@ -236,7 +270,9 @@ impl WebExtractTool {
 
 #[async_trait::async_trait]
 impl Tool for WebExtractTool {
-    fn name(&self) -> &str { "web_extract" }
+    fn name(&self) -> &str {
+        "web_extract"
+    }
 
     fn description(&self) -> &str {
         "Extract text content from the page or a specific element by CSS selector."
@@ -255,23 +291,33 @@ impl Tool for WebExtractTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let selector = call.params.get("selector").and_then(|v| v.as_str()).map(String::from);
+        let selector = call
+            .params
+            .get("selector")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         match self.backend.execute(WebAction::Extract { selector }).await {
             Ok(evidence) => {
                 let text = evidence.text_content.unwrap_or_default();
                 // Truncate for LLM consumption
                 let truncated = if text.len() > 10000 {
-                    format!("{}... [truncated, {} total chars]", &text[..10000], text.len())
+                    format!(
+                        "{}... [truncated, {} total chars]",
+                        &text[..10000],
+                        text.len()
+                    )
                 } else {
                     text.clone()
                 };
 
-                ToolResult::success(&call.id, truncated)
-                    .with_evidence(Evidence::new("text_content", json!({
+                ToolResult::success(&call.id, truncated).with_evidence(Evidence::new(
+                    "text_content",
+                    json!({
                         "length": text.len(),
                         "url": evidence.url,
-                    })))
+                    }),
+                ))
             }
             Err(e) => ToolResult::error(&call.id, format!("Extract failed: {}", e)),
         }

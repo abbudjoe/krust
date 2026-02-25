@@ -3,8 +3,8 @@
 //! The policy engine decides whether an action should be allowed,
 //! denied, or require human confirmation before execution.
 
-use serde::{Deserialize, Serialize};
 use crate::intent::Intent;
+use serde::{Deserialize, Serialize};
 
 /// The decision made by a policy evaluation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,14 +13,10 @@ pub enum PolicyDecision {
     Allow,
 
     /// Action requires human confirmation before proceeding.
-    Confirm {
-        reason: String,
-    },
+    Confirm { reason: String },
 
     /// Action is denied outright.
-    Deny {
-        reason: String,
-    },
+    Deny { reason: String },
 }
 
 /// Trait for implementing policy evaluation.
@@ -111,8 +107,7 @@ mod tests {
     #[test]
     fn test_allow_all() {
         let policy = AllowAllPolicy;
-        let intent = Intent::new("web.navigate")
-            .with_param("url", json!("https://google.com"));
+        let intent = Intent::new("web.navigate").with_param("url", json!("https://google.com"));
         assert_eq!(policy.evaluate(&intent), PolicyDecision::Allow);
     }
 

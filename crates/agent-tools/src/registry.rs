@@ -1,7 +1,7 @@
 //! Tool registry — manages available tools and dispatches calls.
 
-use std::collections::HashMap;
 use crate::tool::{Tool, ToolCall, ToolResult};
+use std::collections::HashMap;
 
 /// Registry of available tools. Dispatches calls to the correct tool.
 pub struct ToolRegistry {
@@ -34,10 +34,7 @@ impl ToolRegistry {
     pub async fn dispatch(&self, call: &ToolCall) -> ToolResult {
         match self.tools.get(&call.name) {
             Some(tool) => tool.execute(call).await,
-            None => ToolResult::error(
-                &call.id,
-                format!("Unknown tool: {}", call.name),
-            ),
+            None => ToolResult::error(&call.id, format!("Unknown tool: {}", call.name)),
         }
     }
 

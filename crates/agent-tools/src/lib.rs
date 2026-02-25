@@ -6,8 +6,8 @@
 //! - **ToolRegistry**: manages available tools and dispatches calls
 //! - **Result validation**: verify tool results match evidence claims
 
-pub mod tool;
 pub mod registry;
+pub mod tool;
 
-pub use tool::{Tool, ToolCall, ToolResult};
 pub use registry::ToolRegistry;
+pub use tool::{Tool, ToolCall, ToolResult};

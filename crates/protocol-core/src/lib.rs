@@ -10,16 +10,16 @@
 //! - **Policy engine** for allow/deny/confirm decisions on actions
 //! - **Checkpoint/resume** protocol for durable execution
 
-pub mod intent;
-pub mod state;
-pub mod policy;
 pub mod artifact;
 pub mod checkpoint;
 pub mod error;
+pub mod intent;
+pub mod policy;
+pub mod state;
 
-pub use error::ProtocolError;
-pub use intent::Intent;
-pub use state::{AgentState, Transition};
-pub use policy::{Policy, PolicyDecision};
 pub use artifact::{ArtifactContract, Evidence};
 pub use checkpoint::Checkpoint;
+pub use error::ProtocolError;
+pub use intent::Intent;
+pub use policy::{Policy, PolicyDecision};
+pub use state::{AgentState, Transition};
