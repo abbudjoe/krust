@@ -10,7 +10,7 @@
 
 use krust_agent_web::action::{WaitCondition, WebAction};
 use krust_agent_web::backend::WebBackend;
-use krust_agent_web::cdp::CdpBackend;
+use krust_agent_web::cdp::{detect_chrome_path, CdpBackend};
 use krust_protocol_core::artifact::{
     ArtifactContract, Evidence, RequiredEvidenceContract, VerificationResult,
 };
@@ -21,9 +21,14 @@ use krust_protocol_core::policy::{
 use krust_protocol_core::state::{apply_transition, AgentState, TransitionEvent};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo},
-    schemars, tool, tool_router, ServerHandler, ServiceExt,
+    model::{
+        CallToolRequestParam, CallToolResult, ListToolsResult, PaginatedRequestParam,
+        ServerCapabilities, ServerInfo,
+    },
+    schemars, tool, tool_router, Error as McpError, RoleServer, ServerHandler, ServiceExt,
 };
+use rmcp::service::RequestContext;
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -72,7 +77,6 @@ impl ExecutionEngine {
 
     /// Run a tool call through the full state machine lifecycle.
     /// Returns (result_string, final_state).
-    #[allow(unused_assignments)]
     async fn execute<F, Fut>(
         &self,
         intent: &Intent,
@@ -116,9 +120,7 @@ impl ExecutionEngine {
             }
         };
 
-        const MAX_RETRIES: u32 = 3;
         let mut last_content: Option<String> = None;
-        let mut retry_count = 0u32;
 
         loop {
             // 3. Execute the tool
@@ -137,12 +139,16 @@ impl ExecutionEngine {
                     };
 
                     match &state {
-                        AgentState::Retrying { .. } => {
-                            if retry_count >= MAX_RETRIES {
+                        AgentState::Retrying {
+                            attempt,
+                            max_attempts,
+                            ..
+                        } => {
+                            if *attempt >= *max_attempts {
                                 let exhausted = TransitionEvent::RetriesExhausted {
                                     reason: format!(
                                         "Tool failed after {} attempts: {}",
-                                        MAX_RETRIES + 1,
+                                        *max_attempts + 1,
                                         last_content.clone().unwrap_or_default()
                                     ),
                                 };
@@ -150,9 +156,8 @@ impl ExecutionEngine {
                                 return (last_content.unwrap_or_default(), state);
                             }
 
-                            retry_count += 1;
                             let retry = TransitionEvent::RetryRequested {
-                                max_attempts: MAX_RETRIES,
+                                max_attempts: *max_attempts,
                             };
                             state = match apply_transition(&state, &retry) {
                                 Some(s) => s,
@@ -226,21 +231,24 @@ impl ExecutionEngine {
 
             // 6. Retry loop after verification failure
             match &state {
-                AgentState::Retrying { .. } => {
-                    if retry_count >= MAX_RETRIES {
+                AgentState::Retrying {
+                    attempt,
+                    max_attempts,
+                    ..
+                } => {
+                    if *attempt >= *max_attempts {
                         let exhausted = TransitionEvent::RetriesExhausted {
                             reason: format!(
                                 "Verification failed after {} attempts",
-                                MAX_RETRIES + 1
+                                *max_attempts + 1
                             ),
                         };
                         state = apply_transition(&state, &exhausted).unwrap_or(state);
                         return (last_content.unwrap_or_default(), state);
                     }
 
-                    retry_count += 1;
                     let retry = TransitionEvent::RetryRequested {
-                        max_attempts: MAX_RETRIES,
+                        max_attempts: *max_attempts,
                     };
                     state = match apply_transition(&state, &retry) {
                         Some(s) => s,
@@ -294,6 +302,9 @@ struct ExtractRequest {
     #[schemars(description = "Optional CSS selector. Omit for full page text.")]
     selector: Option<String>,
 }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ScreenshotRequest {}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct WaitRequest {
@@ -472,6 +483,53 @@ impl KrustServer {
         result
     }
 
+    #[tool(description = "Take a screenshot of the current page. Returns base64-encoded PNG.")]
+    async fn web_screenshot(&self, Parameters(_req): Parameters<ScreenshotRequest>) -> String {
+        if let Err(e) = self.ensure_browser().await {
+            return format!("Error: Browser launch failed: {}", e);
+        }
+
+        let intent = Intent::new("web.screenshot");
+        let step = self.next_step().await;
+        let backend = self.backend.clone();
+        let contract =
+            required_evidence_contract(&["screenshot"], "Screenshot capture evidence required");
+
+        let (result, _state) = self
+            .engine
+            .execute(
+                &intent,
+                &format!("web_screenshot_{}", step),
+                step,
+                Some(&contract),
+                || async {
+                    match backend.execute(WebAction::Screenshot).await {
+                        Ok(evidence) => {
+                            let screenshot = evidence.screenshot.ok_or_else(|| {
+                                "Screenshot failed: backend returned no image data".to_string()
+                            })?;
+
+                            Ok(ToolExecution::new(
+                                screenshot.clone(),
+                                vec![Evidence::new(
+                                    "screenshot",
+                                    serde_json::json!({
+                                        "format": "png",
+                                        "base64_length": screenshot.len(),
+                                        "url": evidence.url,
+                                    }),
+                                )],
+                            ))
+                        }
+                        Err(e) => Err(format!("Screenshot failed: {}", e)),
+                    }
+                },
+            )
+            .await;
+
+        result
+    }
+
     #[tool(description = "Extract text content from the page or a specific element.")]
     async fn web_extract(&self, Parameters(req): Parameters<ExtractRequest>) -> String {
         if let Err(e) = self.ensure_browser().await {
@@ -588,10 +646,57 @@ impl ServerHandler for KrustServer {
             ..Default::default()
         }
     }
+
+    fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
+        let tools = self.tool_router.list_all();
+        std::future::ready(Ok(ListToolsResult {
+            tools,
+            next_cursor: None,
+        }))
+    }
+
+    fn call_tool(
+        &self,
+        request: CallToolRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
+        async move {
+            let tool_context =
+                rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+            self.tool_router
+                .call(tool_context)
+                .await
+                .map_err(|e| McpError::internal_error(format!("Tool error: {:?}", e), None))
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        println!("krust-mcp {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    if args.iter().any(|arg| arg == "--check") {
+        match detect_chrome_path() {
+            Ok(path) => {
+                println!("✅ Chrome detected: {}", path);
+                return Ok(());
+            }
+            Err(err) => {
+                eprintln!("❌ Chrome check failed: {}", err);
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Initialize logging to stderr (MCP uses stdin/stdout for protocol)
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -599,15 +704,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Krust MCP server v{}", env!("CARGO_PKG_VERSION"));
     tracing::info!(
-        "Chrome path: {}",
-        std::env::var("CHROME_PATH").unwrap_or_else(|_| "auto-detect".to_string())
-    );
-    tracing::info!(
         "Headless: {}",
         std::env::var("KRUST_HEADLESS")
             .map(|v| v != "false")
             .unwrap_or(true)
     );
+
+    match detect_chrome_path() {
+        Ok(path) => tracing::info!("Detected Chrome executable: {}", path),
+        Err(err) => tracing::error!(
+            "Chrome/Chromium was not found at startup: {}. \
+             Set CHROME_PATH to your Chrome/Chromium binary before first browser tool call.",
+            err
+        ),
+    }
 
     let server = KrustServer::new();
     let transport = rmcp::transport::io::stdio();

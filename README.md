@@ -74,14 +74,13 @@ In Cursor Settings → MCP, add a new server:
 
 ### Verify Installation
 
-Test that the binary works before configuring your agent:
+Test that Chrome is discoverable before configuring your agent:
 
 ```bash
-# Should print server info and exit cleanly (Ctrl+C to stop)
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"clientInfo":{"name":"test","version":"1.0"},"protocolVersion":"2024-11-05"}}' | ./target/release/krust-mcp 2>/dev/null
+./target/release/krust-mcp --check
 ```
 
-If Chrome isn't found, the server will print an error to stderr explaining how to set `CHROME_PATH`.
+If Chrome isn't found, the command prints an error with instructions for setting `CHROME_PATH`.
 
 ### Troubleshooting
 

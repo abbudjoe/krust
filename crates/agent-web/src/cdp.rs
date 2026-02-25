@@ -10,8 +10,62 @@ use crate::page::PageSnapshot;
 use base64::Engine;
 use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures::StreamExt;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+fn chrome_candidates() -> Vec<&'static str> {
+    if cfg!(target_os = "macos") {
+        vec![
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ]
+    } else {
+        vec![
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium-browser",
+            "chromium",
+            "/usr/bin/google-chrome",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/chromium",
+        ]
+    }
+}
+
+/// Detect a usable Chrome/Chromium executable path.
+///
+/// Resolution order:
+/// 1. `CHROME_PATH` environment variable
+/// 2. Common executable names/paths for the current OS
+pub fn detect_chrome_path() -> Result<String, WebError> {
+    if let Ok(chrome_path) = std::env::var("CHROME_PATH") {
+        let usable = Path::new(&chrome_path).exists() || which::which(&chrome_path).is_ok();
+        if usable {
+            return Ok(chrome_path);
+        }
+
+        return Err(WebError::Other(format!(
+            "CHROME_PATH is set but not usable: {}\n\
+             Verify the path or set CHROME_PATH to a valid Chrome/Chromium binary.",
+            chrome_path
+        )));
+    }
+
+    let candidates = chrome_candidates();
+    let found = candidates
+        .iter()
+        .find(|c| Path::new(c).exists() || which::which(c).is_ok());
+
+    found.map(|path| (*path).to_string()).ok_or_else(|| {
+        WebError::Other(format!(
+            "Chrome/Chromium not found. Searched: {:?}\n\
+             Set the CHROME_PATH environment variable to your Chrome binary.\n\
+             Example: CHROME_PATH=\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\"",
+            candidates
+        ))
+    })
+}
 
 /// CDP backend wrapping a chromiumoxide browser instance.
 pub struct CdpBackend {
@@ -58,50 +112,13 @@ impl CdpBackend {
             .no_sandbox()
             .window_size(width, height);
 
-        // Set Chrome path from env if provided
-        if let Ok(chrome_path) = std::env::var("CHROME_PATH") {
+        let chrome_path = detect_chrome_path()?;
+        if std::env::var("CHROME_PATH").is_ok() {
             tracing::info!("Using Chrome from CHROME_PATH: {}", chrome_path);
-            builder = builder.chrome_executable(chrome_path);
         } else {
-            // Try to find Chrome and report helpful error if not found
-            let candidates = if cfg!(target_os = "macos") {
-                vec![
-                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-                ]
-            } else {
-                vec![
-                    "google-chrome",
-                    "google-chrome-stable",
-                    "chromium-browser",
-                    "chromium",
-                    "/usr/bin/google-chrome",
-                    "/usr/bin/chromium-browser",
-                    "/usr/bin/chromium",
-                ]
-            };
-
-            let found = candidates
-                .iter()
-                .find(|c| std::path::Path::new(c).exists() || which::which(c).is_ok());
-
-            match found {
-                Some(path) => {
-                    tracing::info!("Auto-detected Chrome at: {}", path);
-                    builder = builder.chrome_executable(*path);
-                }
-                None => {
-                    let msg = format!(
-                        "Chrome/Chromium not found. Searched: {:?}\n\
-                         Set the CHROME_PATH environment variable to your Chrome binary.\n\
-                         Example: CHROME_PATH=\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\"",
-                        candidates
-                    );
-                    tracing::error!("{}", msg);
-                    return Err(WebError::Other(msg));
-                }
-            }
+            tracing::info!("Auto-detected Chrome at: {}", chrome_path);
         }
+        builder = builder.chrome_executable(chrome_path);
 
         if !headless {
             builder = builder.with_head();
