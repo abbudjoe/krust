@@ -104,6 +104,23 @@ If both keys are set, Krust uses **TinyFish first**, then falls back to **Brave*
 
 > Note: if your MCP client does not expand `${VAR}` placeholders, use a launcher script that exports keys from your local secret store before exec'ing `krust-mcp`.
 
+#### One-shot setup scripts (included in this repo)
+
+From repo root, run one of:
+
+```bash
+# macOS Keychain
+./scripts/setup/macos-keychain.sh
+
+# 1Password CLI (macOS/Linux)
+./scripts/setup/onepassword.sh
+
+# Linux secret stores (pass or secret-tool)
+./scripts/setup/linux-secrets.sh
+```
+
+Each script creates a launcher (default: `~/bin/krust-mcp-launch` on macOS/1Password, `~/.local/bin/krust-mcp-launch` on Linux). Point MCP `command` to that launcher.
+
 #### macOS + Keychain (recommended)
 
 1) Store keys in Keychain (choose one method):
