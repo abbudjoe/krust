@@ -7,7 +7,6 @@ use crate::action::{WaitCondition, WebAction};
 use crate::backend::{WebBackend, WebError};
 use crate::evidence::WebEvidence;
 use crate::page::PageSnapshot;
-use base64::Engine;
 use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures::StreamExt;
 use std::path::Path;
@@ -235,7 +234,44 @@ impl WebBackend for CdpBackend {
                 })
             }
 
-            WebAction::Screenshot => {
+            WebAction::PressKey { key } => {
+                use chromiumoxide::cdp::browser_protocol::input::{
+                    DispatchKeyEventParams, DispatchKeyEventType,
+                };
+
+                let key_down = DispatchKeyEventParams::builder()
+                    .r#type(DispatchKeyEventType::KeyDown)
+                    .key(&key)
+                    .build()
+                    .map_err(|e| WebError::Other(format!("Key params error: {}", e)))?;
+
+                page.execute(key_down)
+                    .await
+                    .map_err(|e| WebError::Other(format!("Key press failed: {}", e)))?;
+
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+                let key_up = DispatchKeyEventParams::builder()
+                    .r#type(DispatchKeyEventType::KeyUp)
+                    .key(&key)
+                    .build()
+                    .map_err(|e| WebError::Other(format!("Key params error: {}", e)))?;
+
+                page.execute(key_up)
+                    .await
+                    .map_err(|e| WebError::Other(format!("Key release failed: {}", e)))?;
+
+                Ok(WebEvidence {
+                    action_summary: format!("Pressed key: {}", key),
+                    url: page.url().await.ok().flatten().map(|u| u.to_string()),
+                    screenshot: None,
+                    text_content: None,
+                    browser_success: true,
+                    http_status: None,
+                })
+            }
+
+            WebAction::Screenshot { output_path } => {
                 let bytes = page
                     .screenshot(
                         chromiumoxide::page::ScreenshotParams::builder()
@@ -245,12 +281,22 @@ impl WebBackend for CdpBackend {
                     .await
                     .map_err(|e| WebError::Other(format!("Screenshot failed: {}", e)))?;
 
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                // Save to file if path provided, otherwise use temp file
+                let path = if let Some(p) = output_path {
+                    p
+                } else {
+                    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                    format!("/tmp/krust-screenshot-{}.png", ts)
+                };
+
+                tokio::fs::write(&path, &bytes)
+                    .await
+                    .map_err(|e| WebError::Other(format!("Failed to write screenshot: {}", e)))?;
 
                 Ok(WebEvidence {
-                    action_summary: "Captured screenshot".to_string(),
+                    action_summary: format!("Screenshot saved to {}", path),
                     url: page.url().await.ok().flatten().map(|u| u.to_string()),
-                    screenshot: Some(b64),
+                    screenshot: Some(path),
                     text_content: None,
                     browser_success: true,
                     http_status: None,

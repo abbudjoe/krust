@@ -408,12 +408,33 @@ struct ExtractRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct ScreenshotRequest {}
+struct PressKeyRequest {
+    #[schemars(
+        description = "Key to press: Enter, Tab, Escape, ArrowDown, ArrowUp, Backspace, etc."
+    )]
+    key: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ScreenshotRequest {
+    #[schemars(
+        description = "Optional file path to save screenshot. Defaults to /tmp/krust-screenshot-<timestamp>.png"
+    )]
+    output_path: Option<String>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct WaitRequest {
     #[schemars(description = "CSS selector to wait for, or milliseconds as a number string")]
     condition: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SearchRequest {
+    #[schemars(description = "Search query")]
+    query: String,
+    #[schemars(description = "Maximum number of results (default: 5)")]
+    count: Option<u32>,
 }
 
 // --- Server ---
@@ -587,8 +608,52 @@ impl KrustServer {
         finalize_execution_result(result, state)
     }
 
-    #[tool(description = "Take a screenshot of the current page. Returns base64-encoded PNG.")]
-    async fn web_screenshot(&self, Parameters(_req): Parameters<ScreenshotRequest>) -> String {
+    #[tool(
+        description = "Press a keyboard key (Enter, Tab, Escape, ArrowDown, ArrowUp, Backspace, Space, etc.)"
+    )]
+    async fn web_press_key(&self, Parameters(req): Parameters<PressKeyRequest>) -> String {
+        if let Err(e) = self.ensure_browser().await {
+            return format!("Error: Browser launch failed: {}", e);
+        }
+
+        let intent = Intent::new("web.press_key");
+        let step = self.next_step().await;
+        let backend = self.backend.clone();
+        let key = req.key.clone();
+        let contract = required_evidence_contract(&["key_pressed"], "Key press evidence required");
+
+        let (result, _state) = self
+            .engine
+            .execute(
+                &intent,
+                &format!("web_press_key_{}", step),
+                step,
+                Some(&contract),
+                || async {
+                    match backend
+                        .execute(WebAction::PressKey { key: key.clone() })
+                        .await
+                    {
+                        Ok(_evidence) => Ok(ToolExecution::new(
+                            format!("Pressed key: {}", key),
+                            vec![Evidence::new(
+                                "key_pressed",
+                                serde_json::json!({"key": key}),
+                            )],
+                        )),
+                        Err(e) => Err(format!("Key press failed: {}", e)),
+                    }
+                },
+            )
+            .await;
+
+        result
+    }
+
+    #[tool(
+        description = "Take a screenshot of the current page. Saves to a file and returns the file path."
+    )]
+    async fn web_screenshot(&self, Parameters(req): Parameters<ScreenshotRequest>) -> String {
         if let Err(e) = self.ensure_browser().await {
             return format!("Error: Browser launch failed: {}", e);
         }
@@ -596,6 +661,7 @@ impl KrustServer {
         let intent = Intent::new("web.screenshot");
         let step = self.next_step().await;
         let backend = self.backend.clone();
+        let output_path = req.output_path.clone();
         let contract =
             required_evidence_contract(&["screenshot"], "Screenshot capture evidence required");
 
@@ -607,19 +673,23 @@ impl KrustServer {
                 step,
                 Some(&contract),
                 || async {
-                    match backend.execute(WebAction::Screenshot).await {
+                    match backend
+                        .execute(WebAction::Screenshot {
+                            output_path: output_path.clone(),
+                        })
+                        .await
+                    {
                         Ok(evidence) => {
-                            let screenshot = evidence.screenshot.ok_or_else(|| {
-                                "Screenshot failed: backend returned no image data".to_string()
+                            let path = evidence.screenshot.ok_or_else(|| {
+                                "Screenshot failed: no file path returned".to_string()
                             })?;
 
                             Ok(ToolExecution::new(
-                                screenshot.clone(),
+                                format!("Screenshot saved to: {}", path),
                                 vec![Evidence::new(
                                     "screenshot",
                                     serde_json::json!({
-                                        "format": "png",
-                                        "base64_length": screenshot.len(),
+                                        "path": path,
                                         "url": evidence.url,
                                     }),
                                 )],
@@ -632,6 +702,32 @@ impl KrustServer {
             .await;
 
         finalize_execution_result(result, state)
+    }
+
+    #[tool(
+        description = "Search the web using TinyFish AI (with Brave fallback). Returns structured search results without needing browser automation."
+    )]
+    async fn web_search(&self, Parameters(req): Parameters<SearchRequest>) -> String {
+        let count = req.count.unwrap_or(5);
+
+        // Try TinyFish first, then Brave
+        if let Ok(tinyfish_key) = std::env::var("TINYFISH_API_KEY") {
+            match tinyfish_search(&tinyfish_key, &req.query, count).await {
+                Ok(results) => return results,
+                Err(e) => {
+                    tracing::warn!("TinyFish search failed, falling back to Brave: {}", e);
+                }
+            }
+        }
+
+        if let Ok(brave_key) = std::env::var("BRAVE_API_KEY") {
+            match brave_search(&brave_key, &req.query, count).await {
+                Ok(results) => return results,
+                Err(e) => return format!("Search failed (both TinyFish and Brave): {}", e),
+            }
+        }
+
+        "Search unavailable: set TINYFISH_API_KEY or BRAVE_API_KEY environment variable".to_string()
     }
 
     #[tool(description = "Extract text content from the page or a specific element.")]
@@ -771,6 +867,79 @@ impl ServerHandler for KrustServer {
         let tool_context =
             rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         self.tool_router.call(tool_context).await
+    }
+}
+
+// --- Search helpers ---
+
+async fn tinyfish_search(api_key: &str, query: &str, count: u32) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://agent.tinyfish.ai/v1/automation/run-sse")
+        .header("X-API-Key", api_key)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "url": format!("https://www.google.com/search?q={}", urlencoding::encode(query)),
+            "goal": format!("Extract the top {} search result titles, URLs, and descriptions", count),
+        }))
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("TinyFish request failed: {}", e))?;
+
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("TinyFish response read failed: {}", e))?;
+
+    Ok(text)
+}
+
+async fn brave_search(api_key: &str, query: &str, count: u32) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.search.brave.com/res/v1/web/search")
+        .header("X-Subscription-Token", api_key)
+        .header("Accept", "application/json")
+        .query(&[("q", query), ("count", &count.to_string())])
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Brave search request failed: {}", e))?;
+
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Brave response parse failed: {}", e))?;
+
+    // Format results
+    let mut output = String::new();
+    if let Some(results) = data
+        .get("web")
+        .and_then(|w| w.get("results"))
+        .and_then(|r| r.as_array())
+    {
+        for (i, result) in results.iter().enumerate() {
+            let title = result.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let url = result.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let desc = result
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            output.push_str(&format!(
+                "{}. {}\n   {}\n   {}\n\n",
+                i + 1,
+                title,
+                url,
+                desc
+            ));
+        }
+    }
+
+    if output.is_empty() {
+        Err("No results found".to_string())
+    } else {
+        Ok(output)
     }
 }
 
@@ -1114,7 +1283,9 @@ mod tests {
                 "web_click".to_string(),
                 "web_extract".to_string(),
                 "web_navigate".to_string(),
+                "web_press_key".to_string(),
                 "web_screenshot".to_string(),
+                "web_search".to_string(),
                 "web_type".to_string(),
                 "web_wait".to_string(),
             ]
