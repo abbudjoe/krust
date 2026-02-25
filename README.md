@@ -76,37 +76,24 @@ In Cursor Settings → MCP, add a new server:
 
 ### BYO API Keys (Recommended)
 
-`web_search` is built for bring-your-own keys. Set keys locally on your machine and pass them to the MCP server at launch.
+`web_search` supports bring-your-own keys:
+- `TINYFISH_API_KEY` (primary provider)
+- `BRAVE_API_KEY` (fallback provider)
 
-**Recommended security model:**
-- Keep keys in local secret storage (Keychain / 1Password / pass / env manager)
-- Inject at process start via `env`
-- Do **not** hardcode plaintext keys in repo files or shared configs
+If both keys are present, Krust tries **TinyFish first**, then falls back to **Brave**.
 
-Example Claude MCP entry using local env vars:
+**Security rule of thumb:** keep keys in a local secret store and inject them at launch. Avoid plaintext keys in repo files or shared configs.
 
-```json
-{
-  "mcpServers": {
-    "krust": {
-      "command": "/path/to/krust-mcp",
-      "env": {
-        "CHROME_PATH": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "TINYFISH_API_KEY": "${TINYFISH_API_KEY}",
-        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
-      }
-    }
-  }
-}
-```
+#### Step 1 — Choose one setup path
 
-If both keys are set, Krust uses **TinyFish first**, then falls back to **Brave** on failure.
+Pick **one** of these paths:
 
-> Note: if your MCP client does not expand `${VAR}` placeholders, use a launcher script that exports keys from your local secret store before exec'ing `krust-mcp`.
+- **Path A (recommended):** One-shot setup script
+- **Path B:** Manual setup commands
 
-#### One-shot setup scripts (included in this repo)
+##### Path A — One-shot setup script (recommended)
 
-From repo root, run one of:
+From repo root:
 
 ```bash
 # macOS Keychain
@@ -119,29 +106,36 @@ From repo root, run one of:
 ./scripts/setup/linux-secrets.sh
 ```
 
-Each script creates a launcher (default: `~/bin/krust-mcp-launch` on macOS/1Password, `~/.local/bin/krust-mcp-launch` on Linux). Point MCP `command` to that launcher.
+What these scripts do:
+1. Prompt for required inputs/secrets.
+2. Create a launcher script (`krust-mcp-launch`) that fetches keys from your secret store.
+3. Tell you the launcher path to use in MCP config.
 
-#### macOS + Keychain (recommended)
+Default launcher paths:
+- macOS / 1Password: `~/bin/krust-mcp-launch`
+- Linux: `~/.local/bin/krust-mcp-launch`
 
-1) Store keys in Keychain (choose one method):
+##### Path B — Manual setup commands
 
-**Interactive prompt (preferred; avoids shell history):**
+###### B1) macOS + Keychain
 
-```bash
-security add-generic-password -U -a "$USER" -s krust_tinyfish_api_key -w
-security add-generic-password -U -a "$USER" -s krust_brave_api_key -w
-```
+1. Store keys in Keychain (**choose one sub-option**):
 
-`security` will prompt you to paste each secret securely.
+   - **Interactive (preferred; avoids shell history):**
 
-**Inline value form (faster, less secure):**
+   ```bash
+   security add-generic-password -U -a "$USER" -s krust_tinyfish_api_key -w
+   security add-generic-password -U -a "$USER" -s krust_brave_api_key -w
+   ```
 
-```bash
-security add-generic-password -U -a "$USER" -s krust_tinyfish_api_key -w 'PASTE_TINYFISH_KEY_HERE'
-security add-generic-password -U -a "$USER" -s krust_brave_api_key -w 'PASTE_BRAVE_KEY_HERE'
-```
+   - **Inline value (faster, less secure):**
 
-2) Create `~/bin/krust-mcp-launch`:
+   ```bash
+   security add-generic-password -U -a "$USER" -s krust_tinyfish_api_key -w 'PASTE_TINYFISH_KEY_HERE'
+   security add-generic-password -U -a "$USER" -s krust_brave_api_key -w 'PASTE_BRAVE_KEY_HERE'
+   ```
+
+2. Create a launcher script at `~/bin/krust-mcp-launch`:
 
 ```bash
 #!/usr/bin/env bash
@@ -150,18 +144,19 @@ set -euo pipefail
 export TINYFISH_API_KEY="$(security find-generic-password -a "$USER" -s krust_tinyfish_api_key -w)"
 export BRAVE_API_KEY="$(security find-generic-password -a "$USER" -s krust_brave_api_key -w)"
 
-exec /Users/joseph/krust/target/release/krust-mcp "$@"
+exec /path/to/krust-mcp "$@"
 ```
 
-3) Make it executable and use this script as your MCP command:
+3. Make it executable:
 
 ```bash
 chmod 700 ~/bin/krust-mcp-launch
 ```
 
-#### 1Password CLI option (macOS/Linux)
+###### B2) 1Password CLI (macOS/Linux)
 
-If you use 1Password, fetch secrets at launch time instead of storing plaintext in MCP config:
+1. Install/sign in to `op`.
+2. Create launcher script:
 
 ```bash
 #!/usr/bin/env bash
@@ -173,19 +168,40 @@ export BRAVE_API_KEY="$(op read 'op://Private/Krust API Keys/brave')"
 exec /path/to/krust-mcp "$@"
 ```
 
-You need `op` installed and signed in (desktop integration or `op signin`).
+###### B3) Linux (`pass` or `secret-tool`)
 
-#### Linux options
+- **pass**
+  - Store: `pass insert krust/tinyfish_api_key` and `pass insert krust/brave_api_key`
+  - Read in launcher: `$(pass show krust/tinyfish_api_key | head -n1)`
 
-- **pass**:
-  - `pass insert krust/tinyfish_api_key`
-  - `pass insert krust/brave_api_key`
-  - load with `$(pass show krust/tinyfish_api_key | head -n1)`
-- **secret-tool (libsecret)**:
-  - store: `secret-tool store --label='Krust TinyFish' service krust account tinyfish_api_key`
-  - load: `secret-tool lookup service krust account tinyfish_api_key`
+- **secret-tool (libsecret)**
+  - Store: `secret-tool store --label='Krust TinyFish' service krust account tinyfish_api_key`
+  - Read in launcher: `secret-tool lookup service krust account tinyfish_api_key`
 
-In both cases, use a launcher script that exports env vars then `exec`s `krust-mcp`.
+#### Step 2 — Point MCP to the launcher
+
+Use the launcher script as the MCP command (instead of calling `krust-mcp` directly).
+
+Example Claude MCP entry:
+
+```json
+{
+  "mcpServers": {
+    "krust": {
+      "command": "/absolute/path/to/krust-mcp-launch",
+      "env": {
+        "CHROME_PATH": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+      }
+    }
+  }
+}
+```
+
+#### Step 3 — Smoke test `web_search`
+
+1. Restart your MCP client (Claude/Codex/Cursor).
+2. Confirm server appears in MCP.
+3. Run a `web_search` prompt; if TinyFish fails, Krust should fallback to Brave.
 
 ### Verify Installation
 
