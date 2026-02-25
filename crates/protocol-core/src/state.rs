@@ -4,8 +4,8 @@
 //! transitions between them. The state machine is deterministic:
 //! given a state and an event, the next state is always predictable.
 
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// The execution state of an agent task.
@@ -19,6 +19,7 @@ pub enum AgentState {
     Executing {
         tool_call_id: String,
         step: u32,
+        attempt: u32,
     },
 
     /// Waiting for human confirmation (policy gate).
@@ -29,10 +30,7 @@ pub enum AgentState {
     },
 
     /// Verifying that an action produced the expected result.
-    Verifying {
-        tool_call_id: String,
-        step: u32,
-    },
+    Verifying { tool_call_id: String, step: u32 },
 
     /// Action failed, evaluating retry/fallback.
     Retrying {
@@ -43,32 +41,30 @@ pub enum AgentState {
     },
 
     /// Task completed with verified artifacts.
-    Completed {
-        artifacts: Vec<String>,
-    },
+    Completed { artifacts: Vec<String> },
 
     /// Task failed permanently (retries exhausted or unrecoverable).
-    Failed {
-        reason: String,
-    },
+    Failed { reason: String },
 
     /// Task was cancelled by user or policy.
-    Cancelled {
-        reason: String,
-    },
+    Cancelled { reason: String },
 }
 
 /// An event that triggers a state transition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TransitionEvent {
     /// Planning complete, ready to execute.
-    PlanReady { tool_call_id: String },
+    PlanReady { tool_call_id: String, step: u32 },
 
     /// Tool execution completed, evidence attached.
     ToolCompleted { tool_call_id: String, success: bool },
 
     /// Policy requires human confirmation before proceeding.
-    PolicyGate { request_id: String, tool_call_id: String, reason: String },
+    PolicyGate {
+        request_id: String,
+        tool_call_id: String,
+        reason: String,
+    },
 
     /// Human responded to confirmation request.
     HumanDecision { request_id: String, approved: bool },
@@ -117,94 +113,136 @@ impl Transition {
 pub fn apply_transition(state: &AgentState, event: &TransitionEvent) -> Option<AgentState> {
     match (state, event) {
         // Planning → Executing
-        (AgentState::Planning, TransitionEvent::PlanReady { tool_call_id }) => {
+        (AgentState::Planning, TransitionEvent::PlanReady { tool_call_id, step }) => {
             Some(AgentState::Executing {
                 tool_call_id: tool_call_id.clone(),
-                step: 1,
+                step: *step,
+                attempt: 0,
             })
         }
 
         // Planning → Cancelled
-        (AgentState::Planning, TransitionEvent::Cancel { reason }) => {
-            Some(AgentState::Cancelled { reason: reason.clone() })
-        }
+        (AgentState::Planning, TransitionEvent::Cancel { reason }) => Some(AgentState::Cancelled {
+            reason: reason.clone(),
+        }),
 
         // Executing → PolicyGate (WaitingHuman)
-        (AgentState::Executing { .. }, TransitionEvent::PolicyGate { request_id, tool_call_id, reason }) => {
-            Some(AgentState::WaitingHuman {
-                request_id: request_id.clone(),
-                tool_call_id: tool_call_id.clone(),
+        (
+            AgentState::Executing { .. },
+            TransitionEvent::PolicyGate {
+                request_id,
+                tool_call_id,
+                reason,
+            },
+        ) => Some(AgentState::WaitingHuman {
+            request_id: request_id.clone(),
+            tool_call_id: tool_call_id.clone(),
+            reason: reason.clone(),
+        }),
+
+        // Executing → Verifying (tool completed successfully)
+        (
+            AgentState::Executing {
+                tool_call_id, step, ..
+            },
+            TransitionEvent::ToolCompleted { success: true, .. },
+        ) => Some(AgentState::Verifying {
+            tool_call_id: tool_call_id.clone(),
+            step: *step,
+        }),
+
+        // Executing → Retrying (tool failed)
+        (
+            AgentState::Executing {
+                tool_call_id,
+                step,
+                attempt,
+            },
+            TransitionEvent::ToolCompleted { success: false, .. },
+        ) => Some(AgentState::Retrying {
+            tool_call_id: tool_call_id.clone(),
+            step: *step,
+            attempt: *attempt,
+            max_attempts: 3,
+        }),
+
+        // Executing → Cancelled
+        (AgentState::Executing { .. }, TransitionEvent::Cancel { reason }) => {
+            Some(AgentState::Cancelled {
                 reason: reason.clone(),
             })
         }
 
-        // Executing → Verifying (tool completed successfully)
-        (AgentState::Executing { tool_call_id, step }, TransitionEvent::ToolCompleted { success: true, .. }) => {
-            Some(AgentState::Verifying {
-                tool_call_id: tool_call_id.clone(),
-                step: *step,
-            })
-        }
-
-        // Executing → Retrying (tool failed)
-        (AgentState::Executing { tool_call_id, step }, TransitionEvent::ToolCompleted { success: false, .. }) => {
-            Some(AgentState::Retrying {
-                tool_call_id: tool_call_id.clone(),
-                step: *step,
-                attempt: 1,
-                max_attempts: 3,
-            })
-        }
-
-        // Executing → Cancelled
-        (AgentState::Executing { .. }, TransitionEvent::Cancel { reason }) => {
-            Some(AgentState::Cancelled { reason: reason.clone() })
-        }
-
         // WaitingHuman → Executing (approved)
-        (AgentState::WaitingHuman { tool_call_id, .. }, TransitionEvent::HumanDecision { approved: true, .. }) => {
-            Some(AgentState::Executing {
-                tool_call_id: tool_call_id.clone(),
-                step: 1,
-            })
-        }
+        (
+            AgentState::WaitingHuman { tool_call_id, .. },
+            TransitionEvent::HumanDecision { approved: true, .. },
+        ) => Some(AgentState::Executing {
+            tool_call_id: tool_call_id.clone(),
+            step: 1,
+            attempt: 0,
+        }),
 
         // WaitingHuman → Cancelled (denied)
-        (AgentState::WaitingHuman { .. }, TransitionEvent::HumanDecision { approved: false, .. }) => {
-            Some(AgentState::Cancelled {
-                reason: "Human denied action".to_string(),
-            })
-        }
+        (
+            AgentState::WaitingHuman { .. },
+            TransitionEvent::HumanDecision {
+                approved: false, ..
+            },
+        ) => Some(AgentState::Cancelled {
+            reason: "Human denied action".to_string(),
+        }),
 
         // Verifying → Completed
         (AgentState::Verifying { .. }, TransitionEvent::VerificationPassed { artifacts }) => {
-            Some(AgentState::Completed { artifacts: artifacts.clone() })
-        }
-
-        // Verifying → Retrying (verification failed)
-        (AgentState::Verifying { tool_call_id, step }, TransitionEvent::VerificationFailed { .. }) => {
-            Some(AgentState::Retrying {
-                tool_call_id: tool_call_id.clone(),
-                step: *step,
-                attempt: 1,
-                max_attempts: 3,
+            Some(AgentState::Completed {
+                artifacts: artifacts.clone(),
             })
         }
 
-        // Verifying → Planning (move to next step)
-        (AgentState::Verifying { .. }, TransitionEvent::PlanReady { tool_call_id }) => {
+        // Verifying → Retrying (verification failed)
+        (
+            AgentState::Verifying { tool_call_id, step },
+            TransitionEvent::VerificationFailed { .. },
+        ) => Some(AgentState::Retrying {
+            tool_call_id: tool_call_id.clone(),
+            step: *step,
+            attempt: 0,
+            max_attempts: 3,
+        }),
+
+        // Verifying → Executing (move to next step via PlanReady)
+        (
+            AgentState::Verifying { step, .. },
+            TransitionEvent::PlanReady {
+                tool_call_id,
+                step: next_step,
+            },
+        ) => {
+            // Use the step from PlanReady if provided, otherwise increment
+            let new_step = if *next_step > 0 { *next_step } else { step + 1 };
             Some(AgentState::Executing {
                 tool_call_id: tool_call_id.clone(),
-                step: 1,
+                step: new_step,
+                attempt: 0,
             })
         }
 
         // Retrying → Executing (retry attempt)
-        (AgentState::Retrying { tool_call_id, step, attempt, max_attempts }, TransitionEvent::RetryRequested { .. }) => {
+        (
+            AgentState::Retrying {
+                tool_call_id,
+                step,
+                attempt,
+                max_attempts,
+            },
+            TransitionEvent::RetryRequested { .. },
+        ) => {
             if *attempt < *max_attempts {
                 Some(AgentState::Executing {
                     tool_call_id: tool_call_id.clone(),
                     step: *step,
+                    attempt: attempt + 1,
                 })
             } else {
                 None
@@ -213,7 +251,9 @@ pub fn apply_transition(state: &AgentState, event: &TransitionEvent) -> Option<A
 
         // Retrying → Failed (exhausted)
         (AgentState::Retrying { .. }, TransitionEvent::RetriesExhausted { reason }) => {
-            Some(AgentState::Failed { reason: reason.clone() })
+            Some(AgentState::Failed {
+                reason: reason.clone(),
+            })
         }
 
         // Invalid transition
@@ -230,6 +270,7 @@ mod tests {
         let state = AgentState::Planning;
         let event = TransitionEvent::PlanReady {
             tool_call_id: "tc_1".to_string(),
+            step: 1,
         };
         let next = apply_transition(&state, &event).unwrap();
         assert_eq!(
@@ -237,6 +278,7 @@ mod tests {
             AgentState::Executing {
                 tool_call_id: "tc_1".to_string(),
                 step: 1,
+                attempt: 0,
             }
         );
     }
@@ -246,6 +288,7 @@ mod tests {
         let state = AgentState::Executing {
             tool_call_id: "tc_1".to_string(),
             step: 1,
+            attempt: 0,
         };
         let event = TransitionEvent::PolicyGate {
             request_id: "req_1".to_string(),
@@ -299,12 +342,207 @@ mod tests {
 
     #[test]
     fn test_invalid_transition_returns_none() {
-        let state = AgentState::Completed {
-            artifacts: vec![],
-        };
+        let state = AgentState::Completed { artifacts: vec![] };
         let event = TransitionEvent::PlanReady {
             tool_call_id: "tc_1".to_string(),
+            step: 1,
         };
         assert!(apply_transition(&state, &event).is_none());
+    }
+
+    #[test]
+    fn test_retry_attempt_increments_and_exhausts() {
+        // Start executing
+        let state = AgentState::Executing {
+            tool_call_id: "tc_1".to_string(),
+            step: 1,
+            attempt: 0,
+        };
+
+        // Fail → Retrying (attempt carries from Executing)
+        let fail_event = TransitionEvent::ToolCompleted {
+            tool_call_id: "tc_1".to_string(),
+            success: false,
+        };
+        let retrying = apply_transition(&state, &fail_event).unwrap();
+        assert_eq!(
+            retrying,
+            AgentState::Retrying {
+                tool_call_id: "tc_1".to_string(),
+                step: 1,
+                attempt: 0,
+                max_attempts: 3,
+            }
+        );
+
+        // Retry → Executing with attempt=1
+        let retry_event = TransitionEvent::RetryRequested { max_attempts: 3 };
+        let exec1 = apply_transition(&retrying, &retry_event).unwrap();
+        assert_eq!(
+            exec1,
+            AgentState::Executing {
+                tool_call_id: "tc_1".to_string(),
+                step: 1,
+                attempt: 1,
+            }
+        );
+
+        // Fail again → Retrying attempt=1
+        let retrying2 = apply_transition(&exec1, &fail_event).unwrap();
+        assert_eq!(
+            retrying2,
+            AgentState::Retrying {
+                tool_call_id: "tc_1".to_string(),
+                step: 1,
+                attempt: 1,
+                max_attempts: 3,
+            }
+        );
+
+        // Retry → Executing with attempt=2
+        let exec2 = apply_transition(&retrying2, &retry_event).unwrap();
+        assert_eq!(
+            exec2,
+            AgentState::Executing {
+                tool_call_id: "tc_1".to_string(),
+                step: 1,
+                attempt: 2,
+            }
+        );
+
+        // Fail again → Retrying attempt=2
+        let retrying3 = apply_transition(&exec2, &fail_event).unwrap();
+        assert_eq!(
+            retrying3,
+            AgentState::Retrying {
+                tool_call_id: "tc_1".to_string(),
+                step: 1,
+                attempt: 2,
+                max_attempts: 3,
+            }
+        );
+
+        // Retry → Executing with attempt=3
+        let exec3 = apply_transition(&retrying3, &retry_event).unwrap();
+        assert_eq!(
+            exec3,
+            AgentState::Executing {
+                tool_call_id: "tc_1".to_string(),
+                step: 1,
+                attempt: 3,
+            }
+        );
+
+        // Fail again → Retrying attempt=3
+        let retrying4 = apply_transition(&exec3, &fail_event).unwrap();
+        assert_eq!(
+            retrying4,
+            AgentState::Retrying {
+                tool_call_id: "tc_1".to_string(),
+                step: 1,
+                attempt: 3,
+                max_attempts: 3,
+            }
+        );
+
+        // Retry should now fail (attempt >= max_attempts)
+        assert!(apply_transition(&retrying4, &retry_event).is_none());
+
+        // Exhaustion → Failed
+        let exhausted = TransitionEvent::RetriesExhausted {
+            reason: "Max retries reached".to_string(),
+        };
+        let failed = apply_transition(&retrying4, &exhausted).unwrap();
+        match failed {
+            AgentState::Failed { reason } => assert_eq!(reason, "Max retries reached"),
+            _ => panic!("Expected Failed state"),
+        }
+    }
+
+    #[test]
+    fn test_multi_step_progression() {
+        // Step 1: Planning → Executing step=1
+        let state = AgentState::Planning;
+        let exec1 = apply_transition(
+            &state,
+            &TransitionEvent::PlanReady {
+                tool_call_id: "tc_1".to_string(),
+                step: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            exec1,
+            AgentState::Executing {
+                tool_call_id: "tc_1".to_string(),
+                step: 1,
+                attempt: 0,
+            }
+        );
+
+        // Succeed → Verifying step=1
+        let verifying1 = apply_transition(
+            &exec1,
+            &TransitionEvent::ToolCompleted {
+                tool_call_id: "tc_1".to_string(),
+                success: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            verifying1,
+            AgentState::Verifying {
+                tool_call_id: "tc_1".to_string(),
+                step: 1,
+            }
+        );
+
+        // PlanReady for step 2 → Executing step=2
+        let exec2 = apply_transition(
+            &verifying1,
+            &TransitionEvent::PlanReady {
+                tool_call_id: "tc_2".to_string(),
+                step: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            exec2,
+            AgentState::Executing {
+                tool_call_id: "tc_2".to_string(),
+                step: 2,
+                attempt: 0,
+            }
+        );
+
+        // Succeed → Verifying step=2
+        let verifying2 = apply_transition(
+            &exec2,
+            &TransitionEvent::ToolCompleted {
+                tool_call_id: "tc_2".to_string(),
+                success: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            verifying2,
+            AgentState::Verifying {
+                tool_call_id: "tc_2".to_string(),
+                step: 2,
+            }
+        );
+
+        // Complete
+        let completed = apply_transition(
+            &verifying2,
+            &TransitionEvent::VerificationPassed {
+                artifacts: vec!["done".to_string()],
+            },
+        )
+        .unwrap();
+        match completed {
+            AgentState::Completed { artifacts } => assert_eq!(artifacts, vec!["done"]),
+            _ => panic!("Expected Completed"),
+        }
     }
 }

@@ -3,19 +3,26 @@
 //! This backend controls a real Chromium/Chrome browser for desktop
 //! and Linux environments.
 
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use chromiumoxide::{Browser, BrowserConfig, Page};
-use futures::StreamExt;
-use crate::action::{WebAction, WaitCondition};
+use crate::action::{WaitCondition, WebAction};
 use crate::backend::{WebBackend, WebError};
 use crate::evidence::WebEvidence;
 use crate::page::PageSnapshot;
+use base64::Engine;
+use chromiumoxide::{Browser, BrowserConfig, Page};
+use futures::StreamExt;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// CDP backend wrapping a chromiumoxide browser instance.
 pub struct CdpBackend {
     page: Arc<Mutex<Option<Page>>>,
     browser: Arc<Mutex<Option<Browser>>>,
+}
+
+impl Default for CdpBackend {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CdpBackend {
@@ -40,9 +47,7 @@ impl CdpBackend {
             .map_err(|e| WebError::Other(format!("Browser launch error: {}", e)))?;
 
         // Spawn the browser event handler
-        tokio::spawn(async move {
-            while let Some(_event) = handler.next().await {}
-        });
+        tokio::spawn(async move { while let Some(_event) = handler.next().await {} });
 
         let page = browser
             .new_page("about:blank")
@@ -57,11 +62,7 @@ impl CdpBackend {
 
     /// Get a reference to the current page, or error if not launched.
     async fn page(&self) -> Result<Page, WebError> {
-        self.page
-            .lock()
-            .await
-            .clone()
-            .ok_or(WebError::NotConnected)
+        self.page.lock().await.clone().ok_or(WebError::NotConnected)
     }
 }
 
@@ -76,8 +77,14 @@ impl WebBackend for CdpBackend {
                     .await
                     .map_err(|e| WebError::NavigationFailed(e.to_string()))?;
 
-                let title = page.get_title().await.unwrap_or_default().unwrap_or_default();
-                let current_url = page.url().await
+                let title = page
+                    .get_title()
+                    .await
+                    .unwrap_or_default()
+                    .unwrap_or_default();
+                let current_url = page
+                    .url()
+                    .await
                     .ok()
                     .flatten()
                     .map(|u| u.to_string())
@@ -96,7 +103,9 @@ impl WebBackend for CdpBackend {
             WebAction::Click { selector } => {
                 page.find_element(&selector)
                     .await
-                    .map_err(|_| WebError::ElementNotFound { selector: selector.clone() })?
+                    .map_err(|_| WebError::ElementNotFound {
+                        selector: selector.clone(),
+                    })?
                     .click()
                     .await
                     .map_err(|e| WebError::Other(format!("Click failed: {}", e)))?;
@@ -114,14 +123,18 @@ impl WebBackend for CdpBackend {
             WebAction::Type { selector, text } => {
                 page.find_element(&selector)
                     .await
-                    .map_err(|_| WebError::ElementNotFound { selector: selector.clone() })?
+                    .map_err(|_| WebError::ElementNotFound {
+                        selector: selector.clone(),
+                    })?
                     .click()
                     .await
                     .map_err(|e| WebError::Other(format!("Focus failed: {}", e)))?;
 
                 page.find_element(&selector)
                     .await
-                    .map_err(|_| WebError::ElementNotFound { selector: selector.clone() })?
+                    .map_err(|_| WebError::ElementNotFound {
+                        selector: selector.clone(),
+                    })?
                     .type_str(&text)
                     .await
                     .map_err(|e| WebError::Other(format!("Type failed: {}", e)))?;
@@ -146,12 +159,7 @@ impl WebBackend for CdpBackend {
                     .await
                     .map_err(|e| WebError::Other(format!("Screenshot failed: {}", e)))?;
 
-                use std::io::Write;
-                let mut b64 = String::new();
-                {
-                    let mut encoder = base64_encode_writer(&mut b64);
-                    encoder.write_all(&bytes).ok();
-                }
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
 
                 Ok(WebEvidence {
                     action_summary: "Captured screenshot".to_string(),
@@ -165,15 +173,13 @@ impl WebBackend for CdpBackend {
 
             WebAction::Extract { selector } => {
                 let text = if let Some(sel) = selector {
-                    let el = page
-                        .find_element(&sel)
-                        .await
-                        .map_err(|_| WebError::ElementNotFound { selector: sel.clone() })?;
-                    el.inner_text()
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or_default()
+                    let el =
+                        page.find_element(&sel)
+                            .await
+                            .map_err(|_| WebError::ElementNotFound {
+                                selector: sel.clone(),
+                            })?;
+                    el.inner_text().await.ok().flatten().unwrap_or_default()
                 } else {
                     // Extract full page text via JS
                     page.evaluate("document.body.innerText")
@@ -196,9 +202,23 @@ impl WebBackend for CdpBackend {
             WebAction::Wait { condition } => {
                 match condition {
                     WaitCondition::Selector(sel) => {
-                        page.find_element(&sel)
-                            .await
-                            .map_err(|_| WebError::Timeout { ms: 30000 })?;
+                        const POLL_INTERVAL_MS: u64 = 200;
+                        const TIMEOUT_MS: u64 = 30_000;
+                        let deadline = tokio::time::Instant::now()
+                            + tokio::time::Duration::from_millis(TIMEOUT_MS);
+
+                        loop {
+                            if page.find_element(&sel).await.is_ok() {
+                                break;
+                            }
+                            if tokio::time::Instant::now() >= deadline {
+                                return Err(WebError::Timeout { ms: TIMEOUT_MS });
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                                POLL_INTERVAL_MS,
+                            ))
+                            .await;
+                        }
                     }
                     WaitCondition::Navigation => {
                         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
@@ -219,9 +239,7 @@ impl WebBackend for CdpBackend {
             }
 
             WebAction::Back => {
-                page.execute(chromiumoxide::cdp::browser_protocol::page::NavigateToHistoryEntryParams::new(-1))
-                    .await
-                    .ok();
+                page.evaluate("history.back()").await.ok();
                 Ok(WebEvidence {
                     action_summary: "Navigated back".to_string(),
                     url: page.url().await.ok().flatten().map(|u| u.to_string()),
@@ -233,9 +251,7 @@ impl WebBackend for CdpBackend {
             }
 
             WebAction::Forward => {
-                page.execute(chromiumoxide::cdp::browser_protocol::page::NavigateToHistoryEntryParams::new(1))
-                    .await
-                    .ok();
+                page.evaluate("history.forward()").await.ok();
                 Ok(WebEvidence {
                     action_summary: "Navigated forward".to_string(),
                     url: page.url().await.ok().flatten().map(|u| u.to_string()),
@@ -251,8 +267,18 @@ impl WebBackend for CdpBackend {
     async fn snapshot(&self) -> Result<PageSnapshot, WebError> {
         let page = self.page().await?;
 
-        let url = page.url().await.ok().flatten().map(|u| u.to_string()).unwrap_or_default();
-        let title = page.get_title().await.unwrap_or_default().unwrap_or_default();
+        let url = page
+            .url()
+            .await
+            .ok()
+            .flatten()
+            .map(|u| u.to_string())
+            .unwrap_or_default();
+        let title = page
+            .get_title()
+            .await
+            .unwrap_or_default()
+            .unwrap_or_default();
 
         // Basic page snapshot — will be enriched with DOM parsing later
         Ok(PageSnapshot {
@@ -264,44 +290,5 @@ impl WebBackend for CdpBackend {
 
     async fn is_ready(&self) -> bool {
         self.page.lock().await.is_some()
-    }
-}
-
-// Simple base64 encoding (avoid pulling in another crate for now)
-fn base64_encode_writer(output: &mut String) -> Base64Writer<'_> {
-    Base64Writer { output }
-}
-
-struct Base64Writer<'a> {
-    output: &'a mut String,
-}
-
-impl<'a> std::io::Write for Base64Writer<'a> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // Simple base64 - in production use the `base64` crate
-        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        for chunk in buf.chunks(3) {
-            let b0 = chunk[0] as u32;
-            let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-            let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-            let n = (b0 << 16) | (b1 << 8) | b2;
-            self.output.push(CHARS[((n >> 18) & 63) as usize] as char);
-            self.output.push(CHARS[((n >> 12) & 63) as usize] as char);
-            if chunk.len() > 1 {
-                self.output.push(CHARS[((n >> 6) & 63) as usize] as char);
-            } else {
-                self.output.push('=');
-            }
-            if chunk.len() > 2 {
-                self.output.push(CHARS[(n & 63) as usize] as char);
-            } else {
-                self.output.push('=');
-            }
-        }
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
     }
 }
