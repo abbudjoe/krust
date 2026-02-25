@@ -106,11 +106,22 @@ If both keys are set, Krust uses **TinyFish first**, then falls back to **Brave*
 
 #### macOS + Keychain (recommended)
 
-1) Store keys in Keychain:
+1) Store keys in Keychain (choose one method):
+
+**Interactive prompt (preferred; avoids shell history):**
 
 ```bash
-security add-generic-password -a "$USER" -s krust_tinyfish_api_key -w
-security add-generic-password -a "$USER" -s krust_brave_api_key -w
+security add-generic-password -U -a "$USER" -s krust_tinyfish_api_key -w
+security add-generic-password -U -a "$USER" -s krust_brave_api_key -w
+```
+
+`security` will prompt you to paste each secret securely.
+
+**Inline value form (faster, less secure):**
+
+```bash
+security add-generic-password -U -a "$USER" -s krust_tinyfish_api_key -w 'PASTE_TINYFISH_KEY_HERE'
+security add-generic-password -U -a "$USER" -s krust_brave_api_key -w 'PASTE_BRAVE_KEY_HERE'
 ```
 
 2) Create `~/bin/krust-mcp-launch`:
