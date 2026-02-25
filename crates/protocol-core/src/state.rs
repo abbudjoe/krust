@@ -32,7 +32,11 @@ pub enum AgentState {
     },
 
     /// Verifying that an action produced the expected result.
-    Verifying { tool_call_id: String, step: u32 },
+    Verifying {
+        tool_call_id: String,
+        step: u32,
+        attempt: u32,
+    },
 
     /// Action failed, evaluating retry/fallback.
     Retrying {
@@ -147,12 +151,15 @@ pub fn apply_transition(state: &AgentState, event: &TransitionEvent) -> Option<A
         // Executing → Verifying (tool completed successfully)
         (
             AgentState::Executing {
-                tool_call_id, step, ..
+                tool_call_id,
+                step,
+                attempt,
             },
             TransitionEvent::ToolCompleted { success: true, .. },
         ) => Some(AgentState::Verifying {
             tool_call_id: tool_call_id.clone(),
             step: *step,
+            attempt: *attempt,
         }),
 
         // Executing → Retrying (tool failed)
@@ -211,12 +218,16 @@ pub fn apply_transition(state: &AgentState, event: &TransitionEvent) -> Option<A
 
         // Verifying → Retrying (verification failed)
         (
-            AgentState::Verifying { tool_call_id, step },
+            AgentState::Verifying {
+                tool_call_id,
+                step,
+                attempt,
+            },
             TransitionEvent::VerificationFailed { .. },
         ) => Some(AgentState::Retrying {
             tool_call_id: tool_call_id.clone(),
             step: *step,
-            attempt: 0,
+            attempt: *attempt,
             max_attempts: 3,
         }),
 
@@ -362,6 +373,7 @@ mod tests {
         let state = AgentState::Verifying {
             tool_call_id: "tc_1".to_string(),
             step: 1,
+            attempt: 0,
         };
         let event = TransitionEvent::VerificationPassed {
             artifacts: vec!["confirmation_number: ABC123".to_string()],
@@ -373,6 +385,51 @@ mod tests {
             }
             _ => panic!("Expected Completed state"),
         }
+    }
+
+    #[test]
+    fn test_verification_failure_preserves_attempt() {
+        let executing = AgentState::Executing {
+            tool_call_id: "tc_1".to_string(),
+            step: 1,
+            attempt: 2,
+        };
+
+        let verifying = apply_transition(
+            &executing,
+            &TransitionEvent::ToolCompleted {
+                tool_call_id: "tc_1".to_string(),
+                success: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            verifying,
+            AgentState::Verifying {
+                tool_call_id: "tc_1".to_string(),
+                step: 1,
+                attempt: 2,
+            }
+        );
+
+        let retrying = apply_transition(
+            &verifying,
+            &TransitionEvent::VerificationFailed {
+                reason: "missing evidence".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            retrying,
+            AgentState::Retrying {
+                tool_call_id: "tc_1".to_string(),
+                step: 1,
+                attempt: 2,
+                max_attempts: 3,
+            }
+        );
     }
 
     #[test]
@@ -529,6 +586,7 @@ mod tests {
             AgentState::Verifying {
                 tool_call_id: "tc_1".to_string(),
                 step: 1,
+                attempt: 0,
             }
         );
 
@@ -564,6 +622,7 @@ mod tests {
             AgentState::Verifying {
                 tool_call_id: "tc_2".to_string(),
                 step: 2,
+                attempt: 0,
             }
         );
 
