@@ -7,7 +7,6 @@ use crate::action::{WaitCondition, WebAction};
 use crate::backend::{WebBackend, WebError};
 use crate::evidence::WebEvidence;
 use crate::page::PageSnapshot;
-use base64::Engine;
 use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures::StreamExt;
 use std::path::Path;

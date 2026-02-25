@@ -409,13 +409,17 @@ struct ExtractRequest {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct PressKeyRequest {
-    #[schemars(description = "Key to press: Enter, Tab, Escape, ArrowDown, ArrowUp, Backspace, etc.")]
+    #[schemars(
+        description = "Key to press: Enter, Tab, Escape, ArrowDown, ArrowUp, Backspace, etc."
+    )]
     key: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct ScreenshotRequest {
-    #[schemars(description = "Optional file path to save screenshot. Defaults to /tmp/krust-screenshot-<timestamp>.png")]
+    #[schemars(
+        description = "Optional file path to save screenshot. Defaults to /tmp/krust-screenshot-<timestamp>.png"
+    )]
     output_path: Option<String>,
 }
 
@@ -604,7 +608,9 @@ impl KrustServer {
         finalize_execution_result(result, state)
     }
 
-    #[tool(description = "Press a keyboard key (Enter, Tab, Escape, ArrowDown, ArrowUp, Backspace, Space, etc.)")]
+    #[tool(
+        description = "Press a keyboard key (Enter, Tab, Escape, ArrowDown, ArrowUp, Backspace, Space, etc.)"
+    )]
     async fn web_press_key(&self, Parameters(req): Parameters<PressKeyRequest>) -> String {
         if let Err(e) = self.ensure_browser().await {
             return format!("Error: Browser launch failed: {}", e);
@@ -614,8 +620,7 @@ impl KrustServer {
         let step = self.next_step().await;
         let backend = self.backend.clone();
         let key = req.key.clone();
-        let contract =
-            required_evidence_contract(&["key_pressed"], "Key press evidence required");
+        let contract = required_evidence_contract(&["key_pressed"], "Key press evidence required");
 
         let (result, _state) = self
             .engine
@@ -645,7 +650,9 @@ impl KrustServer {
         result
     }
 
-    #[tool(description = "Take a screenshot of the current page. Saves to a file and returns the file path.")]
+    #[tool(
+        description = "Take a screenshot of the current page. Saves to a file and returns the file path."
+    )]
     async fn web_screenshot(&self, Parameters(req): Parameters<ScreenshotRequest>) -> String {
         if let Err(e) = self.ensure_browser().await {
             return format!("Error: Browser launch failed: {}", e);
@@ -697,7 +704,9 @@ impl KrustServer {
         finalize_execution_result(result, state)
     }
 
-    #[tool(description = "Search the web using TinyFish AI (with Brave fallback). Returns structured search results without needing browser automation.")]
+    #[tool(
+        description = "Search the web using TinyFish AI (with Brave fallback). Returns structured search results without needing browser automation."
+    )]
     async fn web_search(&self, Parameters(req): Parameters<SearchRequest>) -> String {
         let count = req.count.unwrap_or(5);
 
@@ -905,7 +914,10 @@ async fn brave_search(api_key: &str, query: &str, count: u32) -> Result<String, 
 
     // Format results
     let mut output = String::new();
-    if let Some(results) = data.get("web").and_then(|w| w.get("results")).and_then(|r| r.as_array())
+    if let Some(results) = data
+        .get("web")
+        .and_then(|w| w.get("results"))
+        .and_then(|r| r.as_array())
     {
         for (i, result) in results.iter().enumerate() {
             let title = result.get("title").and_then(|v| v.as_str()).unwrap_or("");
@@ -914,7 +926,13 @@ async fn brave_search(api_key: &str, query: &str, count: u32) -> Result<String, 
                 .get("description")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            output.push_str(&format!("{}. {}\n   {}\n   {}\n\n", i + 1, title, url, desc));
+            output.push_str(&format!(
+                "{}. {}\n   {}\n   {}\n\n",
+                i + 1,
+                title,
+                url,
+                desc
+            ));
         }
     }
 
@@ -1265,7 +1283,9 @@ mod tests {
                 "web_click".to_string(),
                 "web_extract".to_string(),
                 "web_navigate".to_string(),
+                "web_press_key".to_string(),
                 "web_screenshot".to_string(),
+                "web_search".to_string(),
                 "web_type".to_string(),
                 "web_wait".to_string(),
             ]
