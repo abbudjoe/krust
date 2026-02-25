@@ -71,17 +71,125 @@ impl ArtifactContract for RequiredEvidenceContract {
             .cloned()
             .collect();
 
-        if missing.is_empty() {
-            VerificationResult::Passed {
-                artifacts: self.required_kinds.clone(),
-            }
-        } else {
-            VerificationResult::Insufficient { missing }
+        if !missing.is_empty() {
+            return VerificationResult::Insufficient { missing };
+        }
+
+        if let Some(reason) = validate_required_evidence(&self.required_kinds, evidence) {
+            return VerificationResult::Failed { reason };
+        }
+
+        VerificationResult::Passed {
+            artifacts: self.required_kinds.clone(),
         }
     }
 
     fn description(&self) -> &str {
         &self.description
+    }
+}
+
+fn validate_required_evidence(required_kinds: &[String], evidence: &[Evidence]) -> Option<String> {
+    for required_kind in required_kinds {
+        let mut first_error: Option<String> = None;
+        let mut has_valid_evidence = false;
+
+        for item in evidence.iter().filter(|item| &item.kind == required_kind) {
+            match validate_evidence_item(required_kind, item) {
+                Ok(()) => {
+                    has_valid_evidence = true;
+                    break;
+                }
+                Err(err) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+            }
+        }
+
+        if !has_valid_evidence {
+            return Some(format!(
+                "Invalid evidence for '{}': {}",
+                required_kind,
+                first_error.unwrap_or_else(|| "no valid evidence entries".to_string())
+            ));
+        }
+    }
+
+    None
+}
+
+fn validate_evidence_item(kind: &str, evidence: &Evidence) -> Result<(), String> {
+    match kind {
+        "screenshot" => validate_screenshot_evidence(evidence),
+        "text_content" => validate_text_content_evidence(evidence),
+        _ => Ok(()),
+    }
+}
+
+fn validate_screenshot_evidence(evidence: &Evidence) -> Result<(), String> {
+    let obj = evidence
+        .data
+        .as_object()
+        .ok_or_else(|| "screenshot evidence must be a JSON object".to_string())?;
+
+    let has_non_empty_base64 = obj
+        .get("base64")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+
+    let has_positive_base64_length = obj
+        .get("base64_length")
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| value > 0)
+        .unwrap_or(false);
+
+    let has_non_empty_path = obj
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+
+    if let Some(format) = obj.get("format").and_then(serde_json::Value::as_str) {
+        if format.trim().is_empty() {
+            return Err("screenshot evidence field 'format' cannot be empty".to_string());
+        }
+    }
+
+    if has_non_empty_base64 || has_positive_base64_length || has_non_empty_path {
+        Ok(())
+    } else {
+        Err(
+            "screenshot evidence must include non-empty 'base64', positive 'base64_length', or non-empty 'path'"
+                .to_string(),
+        )
+    }
+}
+
+fn validate_text_content_evidence(evidence: &Evidence) -> Result<(), String> {
+    let obj = evidence
+        .data
+        .as_object()
+        .ok_or_else(|| "text_content evidence must be a JSON object".to_string())?;
+
+    let has_non_empty_text = obj
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+
+    let has_positive_length = obj
+        .get("length")
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| value > 0)
+        .unwrap_or(false);
+
+    if has_non_empty_text || has_positive_length {
+        Ok(())
+    } else {
+        Err("text_content evidence must include non-empty 'text' or positive 'length'".to_string())
     }
 }
 
@@ -129,6 +237,59 @@ mod tests {
                 assert_eq!(missing, vec!["confirmation_number"]);
             }
             other => panic!("Expected Insufficient, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_required_evidence_fails_for_invalid_screenshot_metadata() {
+        let contract = RequiredEvidenceContract {
+            required_kinds: vec!["screenshot".to_string()],
+            description: "Screenshot evidence required".to_string(),
+        };
+        let evidence = vec![Evidence::new("screenshot", json!({"format": "png"}))];
+
+        match contract.verify(&evidence) {
+            VerificationResult::Failed { reason } => {
+                assert!(reason.contains("Invalid evidence for 'screenshot'"));
+                assert!(reason.contains("base64"));
+            }
+            other => panic!("Expected Failed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_required_evidence_accepts_screenshot_with_base64_length() {
+        let contract = RequiredEvidenceContract {
+            required_kinds: vec!["screenshot".to_string()],
+            description: "Screenshot evidence required".to_string(),
+        };
+        let evidence = vec![Evidence::new(
+            "screenshot",
+            json!({"format": "png", "base64_length": 128}),
+        )];
+
+        match contract.verify(&evidence) {
+            VerificationResult::Passed { artifacts } => {
+                assert_eq!(artifacts, vec!["screenshot"]);
+            }
+            other => panic!("Expected Passed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_required_evidence_fails_for_empty_text_content() {
+        let contract = RequiredEvidenceContract {
+            required_kinds: vec!["text_content".to_string()],
+            description: "Text extraction evidence required".to_string(),
+        };
+        let evidence = vec![Evidence::new("text_content", json!({"length": 0}))];
+
+        match contract.verify(&evidence) {
+            VerificationResult::Failed { reason } => {
+                assert!(reason.contains("Invalid evidence for 'text_content'"));
+                assert!(reason.contains("non-empty 'text'"));
+            }
+            other => panic!("Expected Failed, got {:?}", other),
         }
     }
 }

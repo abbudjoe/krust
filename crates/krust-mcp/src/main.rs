@@ -19,24 +19,29 @@ use krust_protocol_core::policy::{
     evaluate_policies, AllowAllPolicy, ConfirmPatternPolicy, Policy, PolicyDecision,
 };
 use krust_protocol_core::state::{apply_transition, AgentState, TransitionEvent};
+use rmcp::service::RequestContext;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolRequestParam, CallToolResult, ListToolsResult, PaginatedRequestParam,
         ServerCapabilities, ServerInfo,
     },
-    schemars, tool, tool_router, Error as McpError, RoleServer, ServerHandler, ServiceExt,
+    schemars, tool, tool_router, ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
 };
-use rmcp::service::RequestContext;
-use std::future::Future;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 // --- Execution Engine ---
 
+const DEFAULT_MAX_EXECUTION_LOOP_ITERATIONS: usize = 128;
+const DEFAULT_MAX_EXECUTION_WALL_CLOCK_BUDGET: Duration = Duration::from_secs(120);
+
 /// Orchestrates tool execution through the protocol-core state machine and policy engine.
 struct ExecutionEngine {
     policies: Vec<Box<dyn Policy>>,
+    max_loop_iterations: usize,
+    max_wall_clock_budget: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -66,7 +71,28 @@ impl ExecutionEngine {
                 deny_prefixes: vec!["danger.".to_string()],
             }),
         ];
-        Self { policies }
+        Self::with_policies(policies)
+    }
+
+    fn with_policies(policies: Vec<Box<dyn Policy>>) -> Self {
+        Self {
+            policies,
+            max_loop_iterations: DEFAULT_MAX_EXECUTION_LOOP_ITERATIONS,
+            max_wall_clock_budget: DEFAULT_MAX_EXECUTION_WALL_CLOCK_BUDGET,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_limits(
+        policies: Vec<Box<dyn Policy>>,
+        max_loop_iterations: usize,
+        max_wall_clock_budget: Duration,
+    ) -> Self {
+        Self {
+            policies,
+            max_loop_iterations,
+            max_wall_clock_budget,
+        }
     }
 
     /// Check policy for an intent. Returns the decision.
@@ -99,8 +125,16 @@ impl ExecutionEngine {
                 );
             }
             PolicyDecision::Confirm { reason } => {
-                // In a real system we'd enter WaitingHuman. For now, log and proceed.
-                tracing::info!("Policy would require confirmation: {}", reason);
+                let blocked_reason = format!(
+                    "Policy requires human confirmation but no approval channel is configured: {}",
+                    reason
+                );
+                return (
+                    blocked_reason.clone(),
+                    AgentState::Failed {
+                        reason: blocked_reason,
+                    },
+                );
             }
         }
 
@@ -120,14 +154,38 @@ impl ExecutionEngine {
             }
         };
 
-        let mut last_content: Option<String> = None;
+        let started_at = Instant::now();
+        let mut loop_iterations = 0usize;
+        let mut last_content = String::new();
 
         loop {
+            loop_iterations += 1;
+
+            if loop_iterations > self.max_loop_iterations {
+                state = AgentState::Failed {
+                    reason: format!(
+                        "Execution aborted: retry safety budget exceeded ({} iterations)",
+                        self.max_loop_iterations
+                    ),
+                };
+                return (last_content, state);
+            }
+
+            if started_at.elapsed() > self.max_wall_clock_budget {
+                state = AgentState::Failed {
+                    reason: format!(
+                        "Execution aborted: retry safety wall-clock budget exceeded ({:?})",
+                        self.max_wall_clock_budget
+                    ),
+                };
+                return (last_content, state);
+            }
+
             // 3. Execute the tool
             let execution = match run_tool().await {
                 Ok(execution) => execution,
                 Err(err) => {
-                    last_content = Some(err.clone());
+                    last_content = err;
 
                     let tool_event = TransitionEvent::ToolCompleted {
                         tool_call_id: tool_call_id.to_string(),
@@ -135,7 +193,7 @@ impl ExecutionEngine {
                     };
                     state = match apply_transition(&state, &tool_event) {
                         Some(s) => s,
-                        None => return (last_content.unwrap_or_default(), state),
+                        None => return (last_content.clone(), state),
                     };
 
                     match &state {
@@ -149,11 +207,11 @@ impl ExecutionEngine {
                                     reason: format!(
                                         "Tool failed after {} attempts: {}",
                                         *max_attempts + 1,
-                                        last_content.clone().unwrap_or_default()
+                                        last_content.clone()
                                     ),
                                 };
                                 state = apply_transition(&state, &exhausted).unwrap_or(state);
-                                return (last_content.unwrap_or_default(), state);
+                                return (last_content.clone(), state);
                             }
 
                             let retry = TransitionEvent::RetryRequested {
@@ -165,21 +223,21 @@ impl ExecutionEngine {
                                     let exhausted = TransitionEvent::RetriesExhausted {
                                         reason: format!(
                                             "Tool failed after retries exhausted: {}",
-                                            last_content.clone().unwrap_or_default()
+                                            last_content.clone()
                                         ),
                                     };
                                     state = apply_transition(&state, &exhausted).unwrap_or(state);
-                                    return (last_content.unwrap_or_default(), state);
+                                    return (last_content.clone(), state);
                                 }
                             };
                             continue;
                         }
-                        _ => return (last_content.unwrap_or_default(), state),
+                        _ => return (last_content.clone(), state),
                     }
                 }
             };
 
-            last_content = Some(execution.content.clone());
+            last_content = execution.content.clone();
 
             // 4. Transition: Executing → Verifying
             let tool_event = TransitionEvent::ToolCompleted {
@@ -188,7 +246,7 @@ impl ExecutionEngine {
             };
             state = match apply_transition(&state, &tool_event) {
                 Some(s) => s,
-                None => return (last_content.unwrap_or_default(), state),
+                None => return (last_content.clone(), state),
             };
 
             // 5. Verify artifacts
@@ -204,7 +262,7 @@ impl ExecutionEngine {
                 VerificationResult::Passed { artifacts } => {
                     let verify_event = TransitionEvent::VerificationPassed { artifacts };
                     state = apply_transition(&state, &verify_event).unwrap_or(state);
-                    return (last_content.unwrap_or_default(), state);
+                    return (last_content.clone(), state);
                 }
                 VerificationResult::Failed { reason } => {
                     let verify_event = TransitionEvent::VerificationFailed {
@@ -212,7 +270,7 @@ impl ExecutionEngine {
                     };
                     state = match apply_transition(&state, &verify_event) {
                         Some(s) => s,
-                        None => return (last_content.unwrap_or_default(), state),
+                        None => return (last_content.clone(), state),
                     };
                 }
                 VerificationResult::Insufficient { missing } => {
@@ -224,7 +282,7 @@ impl ExecutionEngine {
                     };
                     state = match apply_transition(&state, &verify_event) {
                         Some(s) => s,
-                        None => return (last_content.unwrap_or_default(), state),
+                        None => return (last_content.clone(), state),
                     };
                 }
             }
@@ -244,7 +302,7 @@ impl ExecutionEngine {
                             ),
                         };
                         state = apply_transition(&state, &exhausted).unwrap_or(state);
-                        return (last_content.unwrap_or_default(), state);
+                        return (last_content.clone(), state);
                     }
 
                     let retry = TransitionEvent::RetryRequested {
@@ -258,11 +316,11 @@ impl ExecutionEngine {
                                     .to_string(),
                             };
                             state = apply_transition(&state, &exhausted).unwrap_or(state);
-                            return (last_content.unwrap_or_default(), state);
+                            return (last_content.clone(), state);
                         }
                     };
                 }
-                _ => return (last_content.unwrap_or_default(), state),
+                _ => return (last_content.clone(), state),
             }
         }
     }
@@ -647,31 +705,26 @@ impl ServerHandler for KrustServer {
         }
     }
 
-    fn list_tools(
+    async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
+    ) -> Result<ListToolsResult, McpError> {
         let tools = self.tool_router.list_all();
-        std::future::ready(Ok(ListToolsResult {
+        Ok(ListToolsResult {
             tools,
             next_cursor: None,
-        }))
+        })
     }
 
-    fn call_tool(
+    async fn call_tool(
         &self,
         request: CallToolRequestParam,
         context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
-        async move {
-            let tool_context =
-                rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-            self.tool_router
-                .call(tool_context)
-                .await
-                .map_err(|e| McpError::internal_error(format!("Tool error: {:?}", e), None))
-        }
+    ) -> Result<CallToolResult, McpError> {
+        let tool_context =
+            rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(tool_context).await
     }
 }
 
@@ -733,7 +786,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::{
+        model::{ClientInfo, ErrorCode},
+        ClientHandler, ServiceError,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug, Clone, Default)]
+    struct TestClientHandler;
+
+    impl ClientHandler for TestClientHandler {
+        fn get_info(&self) -> ClientInfo {
+            ClientInfo::default()
+        }
+    }
 
     #[test]
     fn test_engine_policy_allows_web_navigate() {
@@ -745,15 +811,13 @@ mod tests {
 
     #[test]
     fn test_allow_all_does_not_short_circuit_confirm_policy() {
-        let engine = ExecutionEngine {
-            policies: vec![
-                Box::new(AllowAllPolicy),
-                Box::new(ConfirmPatternPolicy {
-                    confirm_prefixes: vec!["payment.".to_string()],
-                    deny_prefixes: vec![],
-                }),
-            ],
-        };
+        let engine = ExecutionEngine::with_policies(vec![
+            Box::new(AllowAllPolicy),
+            Box::new(ConfirmPatternPolicy {
+                confirm_prefixes: vec!["payment.".to_string()],
+                deny_prefixes: vec![],
+            }),
+        ]);
 
         let intent = Intent::new("payment.submit");
         match engine.check_policy(&intent) {
@@ -848,12 +912,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_policy_deny_blocks_execution() {
-        let engine = ExecutionEngine {
-            policies: vec![Box::new(ConfirmPatternPolicy {
-                confirm_prefixes: vec![],
-                deny_prefixes: vec!["forbidden.".to_string()],
-            })],
-        };
+        let engine = ExecutionEngine::with_policies(vec![Box::new(ConfirmPatternPolicy {
+            confirm_prefixes: vec![],
+            deny_prefixes: vec!["forbidden.".to_string()],
+        })]);
         let intent = Intent::new("forbidden.action");
 
         let (result, state) = engine
@@ -867,5 +929,200 @@ mod tests {
             AgentState::Failed { .. } => {}
             _ => panic!("Expected Failed, got {:?}", state),
         }
+    }
+
+    #[tokio::test]
+    async fn test_engine_policy_confirm_blocks_execution_without_human_channel() {
+        let engine = ExecutionEngine::with_policies(vec![Box::new(ConfirmPatternPolicy {
+            confirm_prefixes: vec!["payment.".to_string()],
+            deny_prefixes: vec![],
+        })]);
+        let intent = Intent::new("payment.charge");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_closure = attempts.clone();
+
+        let (result, state) = engine
+            .execute(&intent, "tc_confirm", 1, None, move || {
+                let attempts = attempts_for_closure.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok(ToolExecution::new("should never run", vec![]))
+                }
+            })
+            .await;
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        assert!(result.contains("requires human confirmation"));
+        match state {
+            AgentState::Failed { reason } => {
+                assert!(reason.contains("requires human confirmation"));
+            }
+            _ => panic!("Expected Failed, got {:?}", state),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_engine_retry_budget_guard_stops_execution_loop() {
+        let engine = ExecutionEngine::with_limits(
+            vec![Box::new(AllowAllPolicy)],
+            1,
+            Duration::from_secs(60),
+        );
+        let intent = Intent::new("web.extract");
+        let contract = required_evidence_contract(&["text_content"], "Text evidence required");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_closure = attempts.clone();
+
+        let (_result, state) = engine
+            .execute(&intent, "tc_budget", 1, Some(&contract), move || {
+                let attempts = attempts_for_closure.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok(ToolExecution::new("extracted", vec![]))
+                }
+            })
+            .await;
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        match state {
+            AgentState::Failed { reason } => {
+                assert!(reason.contains("retry safety budget exceeded"));
+            }
+            _ => panic!("Expected Failed, got {:?}", state),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mcp_list_tools_exposes_expected_tools() {
+        let (server_transport, client_transport) = tokio::io::duplex(4096);
+
+        let server = KrustServer::new();
+        let server_handle = tokio::spawn(async move {
+            let running = server
+                .serve(server_transport)
+                .await
+                .expect("server should start");
+            running.waiting().await.expect("server should stop cleanly");
+        });
+
+        let client = TestClientHandler::default()
+            .serve(client_transport)
+            .await
+            .expect("client should connect");
+
+        let list = client
+            .list_tools(Default::default())
+            .await
+            .expect("list_tools should succeed");
+
+        let mut tool_names: Vec<String> = list
+            .tools
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        tool_names.sort();
+
+        assert_eq!(
+            tool_names,
+            vec![
+                "web_click".to_string(),
+                "web_extract".to_string(),
+                "web_navigate".to_string(),
+                "web_screenshot".to_string(),
+                "web_type".to_string(),
+                "web_wait".to_string(),
+            ]
+        );
+
+        client.cancel().await.expect("client cancel should succeed");
+        server_handle
+            .await
+            .expect("server task should complete without panic");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_call_tool_dispatches_and_validates_parameters() {
+        let (server_transport, client_transport) = tokio::io::duplex(4096);
+
+        let server = KrustServer::new();
+        let server_handle = tokio::spawn(async move {
+            let running = server
+                .serve(server_transport)
+                .await
+                .expect("server should start");
+            running.waiting().await.expect("server should stop cleanly");
+        });
+
+        let client = TestClientHandler::default()
+            .serve(client_transport)
+            .await
+            .expect("client should connect");
+
+        let err = client
+            .call_tool(CallToolRequestParam {
+                name: "web_navigate".into(),
+                arguments: Some(
+                    serde_json::json!({})
+                        .as_object()
+                        .expect("json object")
+                        .clone(),
+                ),
+            })
+            .await
+            .expect_err("missing url should fail");
+
+        match err {
+            ServiceError::McpError(error) => {
+                assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+                assert!(error.message.contains("url"));
+            }
+            other => panic!("Expected MCP error, got {:?}", other),
+        }
+
+        client.cancel().await.expect("client cancel should succeed");
+        server_handle
+            .await
+            .expect("server task should complete without panic");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_unknown_tool_returns_expected_error_shape() {
+        let (server_transport, client_transport) = tokio::io::duplex(4096);
+
+        let server = KrustServer::new();
+        let server_handle = tokio::spawn(async move {
+            let running = server
+                .serve(server_transport)
+                .await
+                .expect("server should start");
+            running.waiting().await.expect("server should stop cleanly");
+        });
+
+        let client = TestClientHandler::default()
+            .serve(client_transport)
+            .await
+            .expect("client should connect");
+
+        let err = client
+            .call_tool(CallToolRequestParam {
+                name: "unknown_tool".into(),
+                arguments: None,
+            })
+            .await
+            .expect_err("unknown tool should fail");
+
+        match err {
+            ServiceError::McpError(error) => {
+                assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+                assert_eq!(error.message, "tool not found");
+                assert!(error.data.is_none());
+            }
+            other => panic!("Expected MCP error, got {:?}", other),
+        }
+
+        client.cancel().await.expect("client cancel should succeed");
+        server_handle
+            .await
+            .expect("server task should complete without panic");
     }
 }
