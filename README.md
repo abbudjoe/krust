@@ -104,6 +104,89 @@ If both keys are set, Krust uses **TinyFish first**, then falls back to **Brave*
 
 > Note: if your MCP client does not expand `${VAR}` placeholders, use a launcher script that exports keys from your local secret store before exec'ing `krust-mcp`.
 
+#### One-shot setup scripts (included in this repo)
+
+From repo root, run one of:
+
+```bash
+# macOS Keychain
+./scripts/setup/macos-keychain.sh
+
+# 1Password CLI (macOS/Linux)
+./scripts/setup/onepassword.sh
+
+# Linux secret stores (pass or secret-tool)
+./scripts/setup/linux-secrets.sh
+```
+
+Each script creates a launcher (default: `~/bin/krust-mcp-launch` on macOS/1Password, `~/.local/bin/krust-mcp-launch` on Linux). Point MCP `command` to that launcher.
+
+#### macOS + Keychain (recommended)
+
+1) Store keys in Keychain (choose one method):
+
+**Interactive prompt (preferred; avoids shell history):**
+
+```bash
+security add-generic-password -U -a "$USER" -s krust_tinyfish_api_key -w
+security add-generic-password -U -a "$USER" -s krust_brave_api_key -w
+```
+
+`security` will prompt you to paste each secret securely.
+
+**Inline value form (faster, less secure):**
+
+```bash
+security add-generic-password -U -a "$USER" -s krust_tinyfish_api_key -w 'PASTE_TINYFISH_KEY_HERE'
+security add-generic-password -U -a "$USER" -s krust_brave_api_key -w 'PASTE_BRAVE_KEY_HERE'
+```
+
+2) Create `~/bin/krust-mcp-launch`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+export TINYFISH_API_KEY="$(security find-generic-password -a "$USER" -s krust_tinyfish_api_key -w)"
+export BRAVE_API_KEY="$(security find-generic-password -a "$USER" -s krust_brave_api_key -w)"
+
+exec /Users/joseph/krust/target/release/krust-mcp "$@"
+```
+
+3) Make it executable and use this script as your MCP command:
+
+```bash
+chmod 700 ~/bin/krust-mcp-launch
+```
+
+#### 1Password CLI option (macOS/Linux)
+
+If you use 1Password, fetch secrets at launch time instead of storing plaintext in MCP config:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+export TINYFISH_API_KEY="$(op read 'op://Private/Krust API Keys/tinyfish')"
+export BRAVE_API_KEY="$(op read 'op://Private/Krust API Keys/brave')"
+
+exec /path/to/krust-mcp "$@"
+```
+
+You need `op` installed and signed in (desktop integration or `op signin`).
+
+#### Linux options
+
+- **pass**:
+  - `pass insert krust/tinyfish_api_key`
+  - `pass insert krust/brave_api_key`
+  - load with `$(pass show krust/tinyfish_api_key | head -n1)`
+- **secret-tool (libsecret)**:
+  - store: `secret-tool store --label='Krust TinyFish' service krust account tinyfish_api_key`
+  - load: `secret-tool lookup service krust account tinyfish_api_key`
+
+In both cases, use a launcher script that exports env vars then `exec`s `krust-mcp`.
+
 ### Verify Installation
 
 Test that Chrome is discoverable before configuring your agent:
