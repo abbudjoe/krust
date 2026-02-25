@@ -1,11 +1,13 @@
 //! # krust-agent-tools
 //!
-//! Tool framework and MCP compatibility layer.
+//! Tool framework bridging protocol-core with actual capabilities.
 //!
-//! This crate bridges protocol-core with actual capabilities:
 //! - **Tool trait**: any capability implements this
-//! - **MCP compatibility**: expose tools as MCP servers
-//! - **Dispatch + routing**: intent → correct adapter
-//! - **Result validation**: verify tool results match claims
+//! - **ToolRegistry**: manages available tools and dispatches calls
+//! - **Result validation**: verify tool results match evidence claims
 
-// TODO: Tool trait, MCP bridge, dispatcher
+pub mod tool;
+pub mod registry;
+
+pub use tool::{Tool, ToolCall, ToolResult};
+pub use registry::ToolRegistry;
