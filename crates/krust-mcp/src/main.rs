@@ -11,6 +11,9 @@
 use krust_agent_web::action::{WaitCondition, WebAction};
 use krust_agent_web::backend::WebBackend;
 use krust_agent_web::cdp::CdpBackend;
+use krust_protocol_core::artifact::{
+    ArtifactContract, Evidence, RequiredEvidenceContract, VerificationResult,
+};
 use krust_protocol_core::intent::Intent;
 use krust_protocol_core::policy::{
     evaluate_policies, AllowAllPolicy, ConfirmPatternPolicy, Policy, PolicyDecision,
@@ -31,15 +34,31 @@ struct ExecutionEngine {
     policies: Vec<Box<dyn Policy>>,
 }
 
+#[derive(Debug, Clone)]
+struct ToolExecution {
+    content: String,
+    evidence: Vec<Evidence>,
+}
+
+impl ToolExecution {
+    fn new(content: impl Into<String>, evidence: Vec<Evidence>) -> Self {
+        Self {
+            content: content.into(),
+            evidence,
+        }
+    }
+}
+
 impl ExecutionEngine {
     fn new() -> Self {
         let policies: Vec<Box<dyn Policy>> = vec![
             Box::new(AllowAllPolicy),
             Box::new(ConfirmPatternPolicy {
-                // Prove the policy path works: web_ tools go through pattern matching
-                // (they match no deny/confirm prefixes so they get Allow)
-                confirm_prefixes: vec![],
-                deny_prefixes: vec![],
+                // Keep meaningful patterns configured so this policy is not a no-op.
+                // evaluate_policies checks all policies, so this still takes effect even
+                // when AllowAllPolicy appears first.
+                confirm_prefixes: vec!["payment.".to_string(), "email.send".to_string()],
+                deny_prefixes: vec!["danger.".to_string()],
             }),
         ];
         Self { policies }
@@ -53,16 +72,18 @@ impl ExecutionEngine {
 
     /// Run a tool call through the full state machine lifecycle.
     /// Returns (result_string, final_state).
+    #[allow(unused_assignments)]
     async fn execute<F, Fut>(
         &self,
         intent: &Intent,
         tool_call_id: &str,
         step: u32,
-        run_tool: F,
+        contract: Option<&dyn ArtifactContract>,
+        mut run_tool: F,
     ) -> (String, AgentState)
     where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<String, String>>,
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<ToolExecution, String>>,
     {
         // 1. Check policy
         match self.check_policy(intent) {
@@ -95,33 +116,154 @@ impl ExecutionEngine {
             }
         };
 
-        // 3. Execute the tool
-        let (success, content) = match run_tool().await {
-            Ok(result) => (true, result),
-            Err(err) => (false, err),
-        };
+        const MAX_RETRIES: u32 = 3;
+        let mut last_content: Option<String> = None;
+        let mut retry_count = 0u32;
 
-        // 4. Transition: Executing → Verifying (success) or Retrying (failure)
-        let tool_event = TransitionEvent::ToolCompleted {
-            tool_call_id: tool_call_id.to_string(),
-            success,
-        };
-        state = match apply_transition(&state, &tool_event) {
-            Some(s) => s,
-            None => {
-                return (content, state);
-            }
-        };
+        loop {
+            // 3. Execute the tool
+            let execution = match run_tool().await {
+                Ok(execution) => execution,
+                Err(err) => {
+                    last_content = Some(err.clone());
 
-        if success {
-            // 5. Transition: Verifying → Completed
-            let verify_event = TransitionEvent::VerificationPassed {
-                artifacts: vec![content.clone()],
+                    let tool_event = TransitionEvent::ToolCompleted {
+                        tool_call_id: tool_call_id.to_string(),
+                        success: false,
+                    };
+                    state = match apply_transition(&state, &tool_event) {
+                        Some(s) => s,
+                        None => return (last_content.unwrap_or_default(), state),
+                    };
+
+                    match &state {
+                        AgentState::Retrying { .. } => {
+                            if retry_count >= MAX_RETRIES {
+                                let exhausted = TransitionEvent::RetriesExhausted {
+                                    reason: format!(
+                                        "Tool failed after {} attempts: {}",
+                                        MAX_RETRIES + 1,
+                                        last_content.clone().unwrap_or_default()
+                                    ),
+                                };
+                                state = apply_transition(&state, &exhausted).unwrap_or(state);
+                                return (last_content.unwrap_or_default(), state);
+                            }
+
+                            retry_count += 1;
+                            let retry = TransitionEvent::RetryRequested {
+                                max_attempts: MAX_RETRIES,
+                            };
+                            state = match apply_transition(&state, &retry) {
+                                Some(s) => s,
+                                None => {
+                                    let exhausted = TransitionEvent::RetriesExhausted {
+                                        reason: format!(
+                                            "Tool failed after retries exhausted: {}",
+                                            last_content.clone().unwrap_or_default()
+                                        ),
+                                    };
+                                    state = apply_transition(&state, &exhausted).unwrap_or(state);
+                                    return (last_content.unwrap_or_default(), state);
+                                }
+                            };
+                            continue;
+                        }
+                        _ => return (last_content.unwrap_or_default(), state),
+                    }
+                }
             };
-            state = apply_transition(&state, &verify_event).unwrap_or(state);
-        }
 
-        (content, state)
+            last_content = Some(execution.content.clone());
+
+            // 4. Transition: Executing → Verifying
+            let tool_event = TransitionEvent::ToolCompleted {
+                tool_call_id: tool_call_id.to_string(),
+                success: true,
+            };
+            state = match apply_transition(&state, &tool_event) {
+                Some(s) => s,
+                None => return (last_content.unwrap_or_default(), state),
+            };
+
+            // 5. Verify artifacts
+            let verification_result = if let Some(contract) = contract {
+                contract.verify(&execution.evidence)
+            } else {
+                VerificationResult::Passed {
+                    artifacts: vec![execution.content.clone()],
+                }
+            };
+
+            match verification_result {
+                VerificationResult::Passed { artifacts } => {
+                    let verify_event = TransitionEvent::VerificationPassed { artifacts };
+                    state = apply_transition(&state, &verify_event).unwrap_or(state);
+                    return (last_content.unwrap_or_default(), state);
+                }
+                VerificationResult::Failed { reason } => {
+                    let verify_event = TransitionEvent::VerificationFailed {
+                        reason: format!("Artifact verification failed: {}", reason),
+                    };
+                    state = match apply_transition(&state, &verify_event) {
+                        Some(s) => s,
+                        None => return (last_content.unwrap_or_default(), state),
+                    };
+                }
+                VerificationResult::Insufficient { missing } => {
+                    let verify_event = TransitionEvent::VerificationFailed {
+                        reason: format!(
+                            "Artifact verification insufficient evidence: {:?}",
+                            missing
+                        ),
+                    };
+                    state = match apply_transition(&state, &verify_event) {
+                        Some(s) => s,
+                        None => return (last_content.unwrap_or_default(), state),
+                    };
+                }
+            }
+
+            // 6. Retry loop after verification failure
+            match &state {
+                AgentState::Retrying { .. } => {
+                    if retry_count >= MAX_RETRIES {
+                        let exhausted = TransitionEvent::RetriesExhausted {
+                            reason: format!(
+                                "Verification failed after {} attempts",
+                                MAX_RETRIES + 1
+                            ),
+                        };
+                        state = apply_transition(&state, &exhausted).unwrap_or(state);
+                        return (last_content.unwrap_or_default(), state);
+                    }
+
+                    retry_count += 1;
+                    let retry = TransitionEvent::RetryRequested {
+                        max_attempts: MAX_RETRIES,
+                    };
+                    state = match apply_transition(&state, &retry) {
+                        Some(s) => s,
+                        None => {
+                            let exhausted = TransitionEvent::RetriesExhausted {
+                                reason: "Retry transition invalid after verification failure"
+                                    .to_string(),
+                            };
+                            state = apply_transition(&state, &exhausted).unwrap_or(state);
+                            return (last_content.unwrap_or_default(), state);
+                        }
+                    };
+                }
+                _ => return (last_content.unwrap_or_default(), state),
+            }
+        }
+    }
+}
+
+fn required_evidence_contract(kinds: &[&str], description: &str) -> RequiredEvidenceContract {
+    RequiredEvidenceContract {
+        required_kinds: kinds.iter().map(|k| (*k).to_string()).collect(),
+        description: description.to_string(),
     }
 }
 
@@ -216,27 +358,26 @@ impl KrustServer {
         let step = self.next_step().await;
         let backend = self.backend.clone();
         let url = req.url.clone();
+        let contract = required_evidence_contract(&["page_loaded"], "Page must be loaded");
 
         let (result, _state) = self
             .engine
-            .execute(
-                &intent,
-                &format!("web_navigate_{}", step),
-                step,
-                || async move {
-                    match backend
-                        .execute(WebAction::Navigate { url: url.clone() })
-                        .await
-                    {
-                        Ok(evidence) => Ok(format!(
+            .execute(&intent, &format!("web_navigate_{}", step), step, Some(&contract), || async {
+                match backend.execute(WebAction::Navigate { url: url.clone() }).await {
+                    Ok(evidence) => Ok(ToolExecution::new(
+                        format!(
                             "Navigated to {}. Title: {}",
                             evidence.url.as_deref().unwrap_or(&url),
                             evidence.text_content.as_deref().unwrap_or("(none)")
-                        )),
-                        Err(e) => Err(format!("Navigation failed: {}", e)),
-                    }
-                },
-            )
+                        ),
+                        vec![Evidence::new(
+                            "page_loaded",
+                            serde_json::json!({"url": evidence.url, "title": evidence.text_content}),
+                        )],
+                    )),
+                    Err(e) => Err(format!("Navigation failed: {}", e)),
+                }
+            })
             .await;
 
         result
@@ -253,6 +394,7 @@ impl KrustServer {
         let step = self.next_step().await;
         let backend = self.backend.clone();
         let selector = req.selector.clone();
+        let contract = required_evidence_contract(&["element_clicked"], "Click evidence required");
 
         let (result, _state) = self
             .engine
@@ -260,14 +402,21 @@ impl KrustServer {
                 &intent,
                 &format!("web_click_{}", step),
                 step,
-                || async move {
+                Some(&contract),
+                || async {
                     match backend
                         .execute(WebAction::Click {
                             selector: selector.clone(),
                         })
                         .await
                     {
-                        Ok(_) => Ok(format!("Clicked element: {}", selector)),
+                        Ok(evidence) => Ok(ToolExecution::new(
+                            format!("Clicked element: {}", selector),
+                            vec![Evidence::new(
+                                "element_clicked",
+                                serde_json::json!({"selector": selector, "url": evidence.url}),
+                            )],
+                        )),
                         Err(e) => Err(format!("Click failed: {}", e)),
                     }
                 },
@@ -290,6 +439,7 @@ impl KrustServer {
         let backend = self.backend.clone();
         let selector = req.selector.clone();
         let text = req.text.clone();
+        let contract = required_evidence_contract(&["text_typed"], "Type evidence required");
 
         let (result, _state) = self
             .engine
@@ -297,7 +447,8 @@ impl KrustServer {
                 &intent,
                 &format!("web_type_{}", step),
                 step,
-                || async move {
+                Some(&contract),
+                || async {
                     match backend
                         .execute(WebAction::Type {
                             selector: selector.clone(),
@@ -305,7 +456,13 @@ impl KrustServer {
                         })
                         .await
                     {
-                        Ok(_) => Ok(format!("Typed '{}' into {}", text, selector)),
+                        Ok(_evidence) => Ok(ToolExecution::new(
+                            format!("Typed '{}' into {}", text, selector),
+                            vec![Evidence::new(
+                                "text_typed",
+                                serde_json::json!({"selector": selector, "text": text}),
+                            )],
+                        )),
                         Err(e) => Err(format!("Type failed: {}", e)),
                     }
                 },
@@ -325,6 +482,8 @@ impl KrustServer {
         let step = self.next_step().await;
         let backend = self.backend.clone();
         let selector = req.selector.clone();
+        let contract =
+            required_evidence_contract(&["text_content"], "Text extraction evidence required");
 
         let (result, _state) = self
             .engine
@@ -332,19 +491,33 @@ impl KrustServer {
                 &intent,
                 &format!("web_extract_{}", step),
                 step,
-                || async move {
-                    match backend.execute(WebAction::Extract { selector }).await {
+                Some(&contract),
+                || async {
+                    match backend
+                        .execute(WebAction::Extract {
+                            selector: selector.clone(),
+                        })
+                        .await
+                    {
                         Ok(evidence) => {
                             let text = evidence.text_content.unwrap_or_default();
-                            if text.len() > 10000 {
-                                Ok(format!(
+                            let content = if text.len() > 10000 {
+                                format!(
                                     "{}... [truncated, {} chars total]",
                                     &text[..10000],
                                     text.len()
-                                ))
+                                )
                             } else {
-                                Ok(text)
-                            }
+                                text.clone()
+                            };
+
+                            Ok(ToolExecution::new(
+                                content,
+                                vec![Evidence::new(
+                                    "text_content",
+                                    serde_json::json!({"length": text.len(), "url": evidence.url}),
+                                )],
+                            ))
                         }
                         Err(e) => Err(format!("Extract failed: {}", e)),
                     }
@@ -367,6 +540,8 @@ impl KrustServer {
         let step = self.next_step().await;
         let backend = self.backend.clone();
         let condition_str = req.condition.clone();
+        let contract =
+            required_evidence_contract(&["wait_completed"], "Wait completion evidence required");
 
         let (result, _state) = self
             .engine
@@ -374,7 +549,8 @@ impl KrustServer {
                 &intent,
                 &format!("web_wait_{}", step),
                 step,
-                || async move {
+                Some(&contract),
+                || async {
                     let condition = if let Ok(ms) = condition_str.parse::<u64>() {
                         WaitCondition::Duration(ms)
                     } else {
@@ -382,7 +558,13 @@ impl KrustServer {
                     };
 
                     match backend.execute(WebAction::Wait { condition }).await {
-                        Ok(_) => Ok(format!("Wait completed for: {}", condition_str)),
+                        Ok(_) => Ok(ToolExecution::new(
+                            format!("Wait completed for: {}", condition_str),
+                            vec![Evidence::new(
+                                "wait_completed",
+                                serde_json::json!({"condition": condition_str}),
+                            )],
+                        )),
                         Err(e) => Err(format!("Wait failed: {}", e)),
                     }
                 },
@@ -431,7 +613,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krust_protocol_core::policy::PolicyDecision;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn test_engine_policy_allows_web_navigate() {
@@ -442,17 +624,21 @@ mod tests {
     }
 
     #[test]
-    fn test_engine_policy_with_deny_pattern() {
+    fn test_allow_all_does_not_short_circuit_confirm_policy() {
         let engine = ExecutionEngine {
-            policies: vec![Box::new(ConfirmPatternPolicy {
-                confirm_prefixes: vec![],
-                deny_prefixes: vec!["danger.".to_string()],
-            })],
+            policies: vec![
+                Box::new(AllowAllPolicy),
+                Box::new(ConfirmPatternPolicy {
+                    confirm_prefixes: vec!["payment.".to_string()],
+                    deny_prefixes: vec![],
+                }),
+            ],
         };
-        let intent = Intent::new("danger.delete_all");
+
+        let intent = Intent::new("payment.submit");
         match engine.check_policy(&intent) {
-            PolicyDecision::Deny { .. } => {}
-            other => panic!("Expected Deny, got {:?}", other),
+            PolicyDecision::Confirm { .. } => {}
+            other => panic!("Expected Confirm, got {:?}", other),
         }
     }
 
@@ -460,39 +646,83 @@ mod tests {
     async fn test_engine_execute_success_lifecycle() {
         let engine = ExecutionEngine::new();
         let intent = Intent::new("web.navigate");
+        let contract = required_evidence_contract(&["page_loaded"], "Page load evidence required");
 
         let (result, state) = engine
-            .execute(&intent, "tc_test", 1, || async {
-                Ok("Navigated to example.com".to_string())
+            .execute(&intent, "tc_test", 1, Some(&contract), || async {
+                Ok(ToolExecution::new(
+                    "Navigated to example.com",
+                    vec![Evidence::new(
+                        "page_loaded",
+                        serde_json::json!({"url": "https://example.com"}),
+                    )],
+                ))
             })
             .await;
 
         assert_eq!(result, "Navigated to example.com");
         match state {
             AgentState::Completed { artifacts } => {
-                assert_eq!(artifacts, vec!["Navigated to example.com"]);
+                assert_eq!(artifacts, vec!["page_loaded"]);
             }
             _ => panic!("Expected Completed, got {:?}", state),
         }
     }
 
     #[tokio::test]
-    async fn test_engine_execute_failure_lifecycle() {
+    async fn test_engine_execute_retries_until_success() {
         let engine = ExecutionEngine::new();
         let intent = Intent::new("web.click");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_closure = attempts.clone();
 
         let (result, state) = engine
-            .execute(&intent, "tc_test", 1, || async {
-                Err::<String, String>("Element not found".to_string())
+            .execute(&intent, "tc_retry", 1, None, move || {
+                let attempts = attempts_for_closure.clone();
+                async move {
+                    let current = attempts.fetch_add(1, Ordering::SeqCst);
+                    if current < 2 {
+                        Err(format!("transient failure {}", current + 1))
+                    } else {
+                        Ok(ToolExecution::new("eventual success", vec![]))
+                    }
+                }
             })
             .await;
 
-        assert_eq!(result, "Element not found");
+        assert_eq!(result, "eventual success");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
         match state {
-            AgentState::Retrying { attempt, .. } => {
-                assert_eq!(attempt, 0);
+            AgentState::Completed { .. } => {}
+            _ => panic!("Expected Completed, got {:?}", state),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_engine_verification_insufficient_retries_and_fails() {
+        let engine = ExecutionEngine::new();
+        let intent = Intent::new("web.extract");
+        let contract = required_evidence_contract(&["text_content"], "Text evidence required");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_closure = attempts.clone();
+
+        let (result, state) = engine
+            .execute(&intent, "tc_verify", 1, Some(&contract), move || {
+                let attempts = attempts_for_closure.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok(ToolExecution::new("extracted", vec![]))
+                }
+            })
+            .await;
+
+        assert_eq!(result, "extracted");
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        match state {
+            AgentState::Failed { reason } => {
+                assert!(reason.contains("Verification failed after"));
             }
-            _ => panic!("Expected Retrying, got {:?}", state),
+            _ => panic!("Expected Failed, got {:?}", state),
         }
     }
 
@@ -507,8 +737,8 @@ mod tests {
         let intent = Intent::new("forbidden.action");
 
         let (result, state) = engine
-            .execute(&intent, "tc_test", 1, || async {
-                Ok("should not reach".to_string())
+            .execute(&intent, "tc_test", 1, None, || async {
+                Ok(ToolExecution::new("should not reach", vec![]))
             })
             .await;
 

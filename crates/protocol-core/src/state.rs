@@ -27,6 +27,8 @@ pub enum AgentState {
         request_id: String,
         tool_call_id: String,
         reason: String,
+        step: u32,
+        attempt: u32,
     },
 
     /// Verifying that an action produced the expected result.
@@ -128,7 +130,7 @@ pub fn apply_transition(state: &AgentState, event: &TransitionEvent) -> Option<A
 
         // Executing → PolicyGate (WaitingHuman)
         (
-            AgentState::Executing { .. },
+            AgentState::Executing { step, attempt, .. },
             TransitionEvent::PolicyGate {
                 request_id,
                 tool_call_id,
@@ -138,6 +140,8 @@ pub fn apply_transition(state: &AgentState, event: &TransitionEvent) -> Option<A
             request_id: request_id.clone(),
             tool_call_id: tool_call_id.clone(),
             reason: reason.clone(),
+            step: *step,
+            attempt: *attempt,
         }),
 
         // Executing → Verifying (tool completed successfully)
@@ -173,14 +177,19 @@ pub fn apply_transition(state: &AgentState, event: &TransitionEvent) -> Option<A
             })
         }
 
-        // WaitingHuman → Executing (approved)
+        // WaitingHuman → Executing (approved) — preserves step/attempt context
         (
-            AgentState::WaitingHuman { tool_call_id, .. },
+            AgentState::WaitingHuman {
+                tool_call_id,
+                step,
+                attempt,
+                ..
+            },
             TransitionEvent::HumanDecision { approved: true, .. },
         ) => Some(AgentState::Executing {
             tool_call_id: tool_call_id.clone(),
-            step: 1,
-            attempt: 0,
+            step: *step,
+            attempt: *attempt,
         }),
 
         // WaitingHuman → Cancelled (denied)
@@ -310,6 +319,8 @@ mod tests {
             request_id: "req_1".to_string(),
             tool_call_id: "tc_1".to_string(),
             reason: "payment".to_string(),
+            step: 2,
+            attempt: 1,
         };
         let event = TransitionEvent::HumanDecision {
             request_id: "req_1".to_string(),
@@ -320,6 +331,30 @@ mod tests {
             AgentState::Cancelled { .. } => {}
             _ => panic!("Expected Cancelled state"),
         }
+    }
+
+    #[test]
+    fn test_human_approve_preserves_step_and_attempt() {
+        let state = AgentState::WaitingHuman {
+            request_id: "req_1".to_string(),
+            tool_call_id: "tc_9".to_string(),
+            reason: "confirm payment".to_string(),
+            step: 3,
+            attempt: 2,
+        };
+        let event = TransitionEvent::HumanDecision {
+            request_id: "req_1".to_string(),
+            approved: true,
+        };
+        let next = apply_transition(&state, &event).unwrap();
+        assert_eq!(
+            next,
+            AgentState::Executing {
+                tool_call_id: "tc_9".to_string(),
+                step: 3,
+                attempt: 2,
+            }
+        );
     }
 
     #[test]

@@ -202,10 +202,12 @@ impl WebBackend for CdpBackend {
             WebAction::Wait { condition } => {
                 match condition {
                     WaitCondition::Selector(sel) => {
-                        const POLL_INTERVAL_MS: u64 = 200;
+                        const INITIAL_POLL_MS: u64 = 200;
+                        const MAX_POLL_MS: u64 = 2_000;
                         const TIMEOUT_MS: u64 = 30_000;
                         let deadline = tokio::time::Instant::now()
                             + tokio::time::Duration::from_millis(TIMEOUT_MS);
+                        let mut poll_ms = INITIAL_POLL_MS;
 
                         loop {
                             if page.find_element(&sel).await.is_ok() {
@@ -214,10 +216,8 @@ impl WebBackend for CdpBackend {
                             if tokio::time::Instant::now() >= deadline {
                                 return Err(WebError::Timeout { ms: TIMEOUT_MS });
                             }
-                            tokio::time::sleep(tokio::time::Duration::from_millis(
-                                POLL_INTERVAL_MS,
-                            ))
-                            .await;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(poll_ms)).await;
+                            poll_ms = (poll_ms * 2).min(MAX_POLL_MS);
                         }
                     }
                     WaitCondition::Navigation => {
@@ -239,7 +239,9 @@ impl WebBackend for CdpBackend {
             }
 
             WebAction::Back => {
-                page.evaluate("history.back()").await.ok();
+                page.evaluate("history.back()")
+                    .await
+                    .map_err(|e| WebError::Other(format!("Back navigation failed: {}", e)))?;
                 Ok(WebEvidence {
                     action_summary: "Navigated back".to_string(),
                     url: page.url().await.ok().flatten().map(|u| u.to_string()),
@@ -251,7 +253,9 @@ impl WebBackend for CdpBackend {
             }
 
             WebAction::Forward => {
-                page.evaluate("history.forward()").await.ok();
+                page.evaluate("history.forward()")
+                    .await
+                    .map_err(|e| WebError::Other(format!("Forward navigation failed: {}", e)))?;
                 Ok(WebEvidence {
                     action_summary: "Navigated forward".to_string(),
                     url: page.url().await.ok().flatten().map(|u| u.to_string()),
