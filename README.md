@@ -67,10 +67,42 @@ In Cursor Settings → MCP, add a new server:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CHROME_PATH` | auto-detect | Path to Chrome/Chromium binary |
+| `TINYFISH_API_KEY` | unset | TinyFish API key for `web_search` primary provider |
+| `BRAVE_API_KEY` | unset | Brave Search API key for `web_search` fallback provider |
 | `KRUST_HEADLESS` | `true` | Set to `false` to show the browser window |
 | `KRUST_LOG` | `info` | Log level: `error`, `warn`, `info`, `debug`, `trace` |
 | `KRUST_WINDOW_WIDTH` | `1280` | Browser window width |
 | `KRUST_WINDOW_HEIGHT` | `720` | Browser window height |
+
+### BYO API Keys (Recommended)
+
+`web_search` is built for bring-your-own keys. Set keys locally on your machine and pass them to the MCP server at launch.
+
+**Recommended security model:**
+- Keep keys in local secret storage (Keychain / 1Password / pass / env manager)
+- Inject at process start via `env`
+- Do **not** hardcode plaintext keys in repo files or shared configs
+
+Example Claude MCP entry using local env vars:
+
+```json
+{
+  "mcpServers": {
+    "krust": {
+      "command": "/path/to/krust-mcp",
+      "env": {
+        "CHROME_PATH": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "TINYFISH_API_KEY": "${TINYFISH_API_KEY}",
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+If both keys are set, Krust uses **TinyFish first**, then falls back to **Brave** on failure.
+
+> Note: if your MCP client does not expand `${VAR}` placeholders, use a launcher script that exports keys from your local secret store before exec'ing `krust-mcp`.
 
 ### Verify Installation
 
@@ -99,6 +131,10 @@ If Chrome isn't found, the command prints an error with instructions for setting
 - Chrome might already be running with `--remote-debugging-port`. Close it first.
 - Try `KRUST_HEADLESS=false` to see what the browser is doing
 
+**"web_search unavailable"**
+- Set `TINYFISH_API_KEY` and/or `BRAVE_API_KEY` in your MCP server environment.
+- If using placeholder variables in config, confirm your MCP client expands them; otherwise use a launcher script.
+
 ---
 
 ## What is this?
@@ -122,9 +158,11 @@ When connected via MCP, your agent gets these tools:
 | `web_navigate` | Navigate to a URL |
 | `web_click` | Click an element by CSS selector |
 | `web_type` | Type text into an input element |
+| `web_press_key` | Press a keyboard key (Enter/Tab/Escape/etc.) |
 | `web_extract` | Extract text from the page or a specific element |
-| `web_screenshot` | Take a screenshot of the current page |
+| `web_screenshot` | Take a screenshot and return saved file path |
 | `web_wait` | Wait for an element to appear or a duration |
+| `web_search` | Search via TinyFish (primary) with Brave fallback |
 
 Every tool call passes through the Krust state machine: policy check → execute → verify evidence → complete or retry.
 
