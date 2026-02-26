@@ -14,10 +14,12 @@ BINARY_PATH="${KRUST_MCP_BINARY:-$DEFAULT_BINARY}"
 LAUNCHER_PATH="${KRUST_LAUNCHER_PATH:-$HOME/.local/bin/krust-mcp-launch}"
 
 echo "== Krust Linux secret setup =="
-read -r -p "Path to krust-mcp binary [$BINARY_PATH]: " input_binary
+read -r -p "Path to krust-mcp binary [default: $BINARY_PATH] (press Enter to accept): " input_binary
 if [[ -n "${input_binary}" ]]; then
   BINARY_PATH="$input_binary"
 fi
+
+echo "Using krust-mcp binary: $BINARY_PATH"
 
 echo
 echo "Choose backend:"
