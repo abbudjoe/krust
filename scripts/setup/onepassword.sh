@@ -16,10 +16,12 @@ DEFAULT_TINY_REF="op://Private/Krust API Keys/tinyfish"
 DEFAULT_BRAVE_REF="op://Private/Krust API Keys/brave"
 
 echo "== Krust 1Password setup =="
-read -r -p "Path to krust-mcp binary [$BINARY_PATH]: " input_binary
+read -r -p "Path to krust-mcp binary [default: $BINARY_PATH] (press Enter to accept): " input_binary
 if [[ -n "${input_binary}" ]]; then
   BINARY_PATH="$input_binary"
 fi
+
+echo "Using krust-mcp binary: $BINARY_PATH"
 
 read -r -p "TinyFish secret reference [$DEFAULT_TINY_REF]: " tiny_ref
 read -r -p "Brave secret reference [$DEFAULT_BRAVE_REF]: " brave_ref

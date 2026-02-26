@@ -22,10 +22,12 @@ BRAVE_SERVICE="${KRUST_BRAVE_SERVICE:-krust_brave_api_key}"
 
 echo "== Krust macOS Keychain setup =="
 echo
-read -r -p "Path to krust-mcp binary [$BINARY_PATH]: " input_binary
+read -r -p "Path to krust-mcp binary [default: $BINARY_PATH] (press Enter to accept): " input_binary
 if [[ -n "${input_binary}" ]]; then
   BINARY_PATH="$input_binary"
 fi
+
+echo "Using krust-mcp binary: $BINARY_PATH"
 
 if [[ ! -x "$BINARY_PATH" ]]; then
   echo "Warning: binary not executable at: $BINARY_PATH" >&2

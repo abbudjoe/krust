@@ -108,6 +108,7 @@ From repo root:
 
 What these scripts do:
 1. Prompt for required inputs/secrets.
+   - For the first prompt (`Path to krust-mcp binary`), press **Enter** to accept the default shown in brackets.
 2. Create a launcher script (`krust-mcp-launch`) that fetches keys from your secret store.
 3. Tell you the launcher path to use in MCP config.
 
