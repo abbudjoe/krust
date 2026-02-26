@@ -872,6 +872,45 @@ impl ServerHandler for KrustServer {
 
 // --- Search helpers ---
 
+fn truncate_error_body(body: &str) -> String {
+    const MAX_CHARS: usize = 240;
+
+    let trimmed = body.trim();
+    let mut chars = trimmed.chars();
+    let truncated: String = chars.by_ref().take(MAX_CHARS).collect();
+
+    if chars.next().is_some() {
+        format!("{}…", truncated)
+    } else {
+        truncated
+    }
+}
+
+fn extract_json_error_message(payload: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+
+    if let Some(error) = value.get("error") {
+        if let Some(message) = error.get("message").and_then(|v| v.as_str()) {
+            return Some(message.to_string());
+        }
+
+        if let Some(message) = error.as_str() {
+            return Some(message.to_string());
+        }
+
+        return Some(error.to_string());
+    }
+
+    if let (Some(message), Some(code)) = (
+        value.get("message").and_then(|v| v.as_str()),
+        value.get("code"),
+    ) {
+        return Some(format!("{} ({})", message, code));
+    }
+
+    None
+}
+
 async fn tinyfish_search(api_key: &str, query: &str, count: u32) -> Result<String, String> {
     let client = reqwest::Client::new();
     let resp = client
@@ -887,10 +926,21 @@ async fn tinyfish_search(api_key: &str, query: &str, count: u32) -> Result<Strin
         .await
         .map_err(|e| format!("TinyFish request failed: {}", e))?;
 
+    let status = resp.status();
     let text = resp
         .text()
         .await
         .map_err(|e| format!("TinyFish response read failed: {}", e))?;
+
+    if !status.is_success() {
+        let detail =
+            extract_json_error_message(&text).unwrap_or_else(|| truncate_error_body(&text));
+        return Err(format!("TinyFish HTTP {}: {}", status, detail));
+    }
+
+    if let Some(detail) = extract_json_error_message(&text) {
+        return Err(format!("TinyFish error payload: {}", detail));
+    }
 
     Ok(text)
 }
@@ -907,10 +957,24 @@ async fn brave_search(api_key: &str, query: &str, count: u32) -> Result<String, 
         .await
         .map_err(|e| format!("Brave search request failed: {}", e))?;
 
-    let data: serde_json::Value = resp
-        .json()
+    let status = resp.status();
+    let body = resp
+        .text()
         .await
-        .map_err(|e| format!("Brave response parse failed: {}", e))?;
+        .map_err(|e| format!("Brave response read failed: {}", e))?;
+
+    if !status.is_success() {
+        let detail =
+            extract_json_error_message(&body).unwrap_or_else(|| truncate_error_body(&body));
+        return Err(format!("Brave HTTP {}: {}", status, detail));
+    }
+
+    if let Some(detail) = extract_json_error_message(&body) {
+        return Err(format!("Brave error payload: {}", detail));
+    }
+
+    let data: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("Brave response parse failed: {}", e))?;
 
     // Format results
     let mut output = String::new();
@@ -1245,6 +1309,30 @@ mod tests {
 
         assert!(rendered.contains("verification failed"));
         assert!(rendered.contains("backend failure payload"));
+    }
+
+    #[test]
+    fn test_extract_json_error_message_handles_nested_error_payload() {
+        let payload =
+            r#"{"error":{"code":"INVALID_API_KEY","message":"Invalid or expired API key"}}"#;
+        assert_eq!(
+            extract_json_error_message(payload),
+            Some("Invalid or expired API key".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_json_error_message_ignores_normal_search_payload() {
+        let payload = r#"{"web":{"results":[{"title":"Rust"}]}}"#;
+        assert_eq!(extract_json_error_message(payload), None);
+    }
+
+    #[test]
+    fn test_truncate_error_body_limits_length() {
+        let long = "x".repeat(400);
+        let truncated = truncate_error_body(&long);
+        assert!(truncated.len() < long.len());
+        assert!(truncated.ends_with('…'));
     }
 
     #[tokio::test]
