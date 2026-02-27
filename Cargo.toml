@@ -5,7 +5,7 @@ members = [
     "crates/agent-web",
     "crates/agent-tools",
     "crates/agent-eval",
-    "crates/krust-mcp",
+    "crates/ember-mcp",
 ]
 
 [workspace.package]

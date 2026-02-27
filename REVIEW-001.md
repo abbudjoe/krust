@@ -28,6 +28,6 @@ Multi-step tasks lose progress. Step from `Verifying` is discarded.
 **Fix**: Add attempt count to `Executing` state or to the transition event so it's preserved through the retry cycle.
 
 ### 6. MCP server bypasses protocol-core entirely
-**File**: `crates/krust-mcp/src/main.rs`
+**File**: `crates/ember-mcp/src/main.rs`
 Server calls backend directly. No state machine, no policy checks, no evidence verification, no artifact contracts. The core value prop is not wired in.
 **Fix**: Wire MCP tool handlers through protocol-core: Planning → policy check → Executing → Verifying → Completed/Retry.
