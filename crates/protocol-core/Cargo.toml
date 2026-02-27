@@ -1,5 +1,5 @@
 [package]
-name = "krust-protocol-core"
+name = "ember-protocol-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

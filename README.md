@@ -1,4 +1,4 @@
-# Krust
+# Ember
 
 **Verified execution protocols for AI agents.**
 
@@ -16,12 +16,12 @@ A Rust toolkit that makes agent actions deterministic, observable, and recoverab
 ### Build
 
 ```bash
-git clone https://github.com/abbudjoe/krust.git
-cd krust
-cargo build --release --bin krust-mcp
+git clone https://github.com/abbudjoe/ember.git
+cd ember
+cargo build --release --bin ember-mcp
 ```
 
-The binary lands at `target/release/krust-mcp`.
+The binary lands at `target/release/ember-mcp`.
 
 ### Configure with Claude Code
 
@@ -30,8 +30,8 @@ Add to `~/.claude/mcp.json`:
 ```json
 {
   "mcpServers": {
-    "krust": {
-      "command": "/path/to/krust-mcp",
+    "ember": {
+      "command": "/path/to/ember-mcp",
       "env": {
         "CHROME_PATH": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
       }
@@ -40,7 +40,7 @@ Add to `~/.claude/mcp.json`:
 }
 ```
 
-Then restart Claude Code and run `/mcp` to verify krust is connected.
+Then restart Claude Code and run `/mcp` to verify ember is connected.
 
 ### Configure with Codex
 
@@ -49,8 +49,8 @@ Add to your MCP config (check Codex docs for location):
 ```json
 {
   "mcpServers": {
-    "krust": {
-      "command": "/path/to/krust-mcp"
+    "ember": {
+      "command": "/path/to/ember-mcp"
     }
   }
 }
@@ -59,8 +59,8 @@ Add to your MCP config (check Codex docs for location):
 ### Configure with Cursor
 
 In Cursor Settings → MCP, add a new server:
-- **Name**: krust
-- **Command**: `/path/to/krust-mcp`
+- **Name**: ember
+- **Command**: `/path/to/ember-mcp`
 
 ### Environment Variables
 
@@ -80,7 +80,7 @@ In Cursor Settings → MCP, add a new server:
 - `TINYFISH_API_KEY` (primary provider)
 - `BRAVE_API_KEY` (fallback provider)
 
-If both keys are present, Krust tries **TinyFish first**, then falls back to **Brave**.
+If both keys are present, Ember tries **TinyFish first**, then falls back to **Brave**.
 
 **Security rule of thumb:** keep keys in a local secret store and inject them at launch. Avoid plaintext keys in repo files or shared configs.
 
@@ -108,13 +108,13 @@ From repo root:
 
 What these scripts do:
 1. Prompt for required inputs/secrets.
-   - For the first prompt (`Path to krust-mcp binary`), press **Enter** to accept the default shown in brackets.
-2. Create a launcher script (`krust-mcp-launch`) that fetches keys from your secret store.
+   - For the first prompt (`Path to ember-mcp binary`), press **Enter** to accept the default shown in brackets.
+2. Create a launcher script (`ember-mcp-launch`) that fetches keys from your secret store.
 3. Tell you the launcher path to use in MCP config.
 
 Default launcher paths:
-- macOS / 1Password: `~/bin/krust-mcp-launch`
-- Linux: `~/.local/bin/krust-mcp-launch`
+- macOS / 1Password: `~/bin/ember-mcp-launch`
+- Linux: `~/.local/bin/ember-mcp-launch`
 
 ##### Path B — Manual setup commands
 
@@ -125,33 +125,33 @@ Default launcher paths:
    - **Interactive (preferred; avoids shell history):**
 
    ```bash
-   security add-generic-password -U -a "$USER" -s krust_tinyfish_api_key -w
-   security add-generic-password -U -a "$USER" -s krust_brave_api_key -w
+   security add-generic-password -U -a "$USER" -s ember_tinyfish_api_key -w
+   security add-generic-password -U -a "$USER" -s ember_brave_api_key -w
    ```
 
    - **Inline value (faster, less secure):**
 
    ```bash
-   security add-generic-password -U -a "$USER" -s krust_tinyfish_api_key -w 'PASTE_TINYFISH_KEY_HERE'
-   security add-generic-password -U -a "$USER" -s krust_brave_api_key -w 'PASTE_BRAVE_KEY_HERE'
+   security add-generic-password -U -a "$USER" -s ember_tinyfish_api_key -w 'PASTE_TINYFISH_KEY_HERE'
+   security add-generic-password -U -a "$USER" -s ember_brave_api_key -w 'PASTE_BRAVE_KEY_HERE'
    ```
 
-2. Create a launcher script at `~/bin/krust-mcp-launch`:
+2. Create a launcher script at `~/bin/ember-mcp-launch`:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-export TINYFISH_API_KEY="$(security find-generic-password -a "$USER" -s krust_tinyfish_api_key -w)"
-export BRAVE_API_KEY="$(security find-generic-password -a "$USER" -s krust_brave_api_key -w)"
+export TINYFISH_API_KEY="$(security find-generic-password -a "$USER" -s ember_tinyfish_api_key -w)"
+export BRAVE_API_KEY="$(security find-generic-password -a "$USER" -s ember_brave_api_key -w)"
 
-exec /path/to/krust-mcp "$@"
+exec /path/to/ember-mcp "$@"
 ```
 
 3. Make it executable:
 
 ```bash
-chmod 700 ~/bin/krust-mcp-launch
+chmod 700 ~/bin/ember-mcp-launch
 ```
 
 ###### B2) 1Password CLI (macOS/Linux)
@@ -163,33 +163,33 @@ chmod 700 ~/bin/krust-mcp-launch
 #!/usr/bin/env bash
 set -euo pipefail
 
-export TINYFISH_API_KEY="$(op read 'op://Private/Krust API Keys/tinyfish')"
-export BRAVE_API_KEY="$(op read 'op://Private/Krust API Keys/brave')"
+export TINYFISH_API_KEY="$(op read 'op://Private/Ember API Keys/tinyfish')"
+export BRAVE_API_KEY="$(op read 'op://Private/Ember API Keys/brave')"
 
-exec /path/to/krust-mcp "$@"
+exec /path/to/ember-mcp "$@"
 ```
 
 ###### B3) Linux (`pass` or `secret-tool`)
 
 - **pass**
-  - Store: `pass insert krust/tinyfish_api_key` and `pass insert krust/brave_api_key`
-  - Read in launcher: `$(pass show krust/tinyfish_api_key | head -n1)`
+  - Store: `pass insert ember/tinyfish_api_key` and `pass insert ember/brave_api_key`
+  - Read in launcher: `$(pass show ember/tinyfish_api_key | head -n1)`
 
 - **secret-tool (libsecret)**
-  - Store: `secret-tool store --label='Krust TinyFish' service krust account tinyfish_api_key`
-  - Read in launcher: `secret-tool lookup service krust account tinyfish_api_key`
+  - Store: `secret-tool store --label='Ember TinyFish' service ember account tinyfish_api_key`
+  - Read in launcher: `secret-tool lookup service ember account tinyfish_api_key`
 
 #### Step 2 — Point MCP to the launcher
 
-Use the launcher script as the MCP command (instead of calling `krust-mcp` directly).
+Use the launcher script as the MCP command (instead of calling `ember-mcp` directly).
 
 Example Claude MCP entry:
 
 ```json
 {
   "mcpServers": {
-    "krust": {
-      "command": "/absolute/path/to/krust-mcp-launch",
+    "ember": {
+      "command": "/absolute/path/to/ember-mcp-launch",
       "env": {
         "CHROME_PATH": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
       }
@@ -202,24 +202,24 @@ Example Claude MCP entry:
 
 1. Restart your MCP client (Claude/Codex/Cursor).
 2. Confirm server appears in MCP.
-3. Run a `web_search` prompt; if TinyFish fails, Krust should fallback to Brave.
+3. Run a `web_search` prompt; if TinyFish fails, Ember should fallback to Brave.
 
 ### Verify Installation
 
 Test that Chrome is discoverable before configuring your agent:
 
 ```bash
-./target/release/krust-mcp --check
+./target/release/ember-mcp --check
 ```
 
 If Chrome isn't found, the command prints an error with instructions for setting `CHROME_PATH`.
 
 ### Troubleshooting
 
-**"krust not showing in /mcp"**
+**"ember not showing in /mcp"**
 - Make sure the path to the binary is absolute (not relative)
 - Restart Claude Code after editing `mcp.json`
-- Check stderr: `./target/release/krust-mcp 2>&1 | head`
+- Check stderr: `./target/release/ember-mcp 2>&1 | head`
 
 **"Browser launch failed"**
 - Set `CHROME_PATH` to your Chrome binary explicitly
@@ -241,7 +241,7 @@ If Chrome isn't found, the command prints an error with instructions for setting
 
 AI agents fail ~40% of the time on real-world tasks — not because the models are dumb, but because there's no infrastructure between "AI decides to do something" and "thing actually happens." Every agent app builds this control layer from scratch and gets it wrong differently.
 
-Krust is the open-source protocol layer that fixes this. It provides:
+Ember is the open-source protocol layer that fixes this. It provides:
 
 - **A state machine** that governs agent task execution with deterministic transitions
 - **Artifact contracts** that verify actions actually worked (not just that the tool returned "success")
@@ -264,7 +264,7 @@ When connected via MCP, your agent gets these tools:
 | `web_wait` | Wait for an element to appear or a duration |
 | `web_search` | Search via TinyFish (primary) with Brave fallback |
 
-Every tool call passes through the Krust state machine: policy check → execute → verify evidence → complete or retry.
+Every tool call passes through the Ember state machine: policy check → execute → verify evidence → complete or retry.
 
 ## Architecture
 
@@ -284,11 +284,11 @@ Every tool call passes through the Krust state machine: policy check → execute
 
 | Crate | Description |
 |-------|-------------|
-| `krust-protocol-core` | State machine, typed intents, artifact contracts, policy engine |
-| `krust-agent-web` | Web interaction abstractions with pluggable backends |
-| `krust-agent-tools` | Tool framework and MCP compatibility layer |
-| `krust-agent-eval` | Evaluation harness and reliability metrics |
-| `krust-mcp` | MCP server binary — point any agent at this |
+| `ember-protocol-core` | State machine, typed intents, artifact contracts, policy engine |
+| `ember-agent-web` | Web interaction abstractions with pluggable backends |
+| `ember-agent-tools` | Tool framework and MCP compatibility layer |
+| `ember-agent-eval` | Evaluation harness and reliability metrics |
+| `ember-mcp` | MCP server binary — point any agent at this |
 
 ## Development
 

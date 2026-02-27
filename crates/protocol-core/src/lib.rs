@@ -1,4 +1,4 @@
-//! # krust-protocol-core
+//! # ember-protocol-core
 //!
 //! State machine, typed intents, artifact contracts, and policy engine
 //! for verified AI agent execution.

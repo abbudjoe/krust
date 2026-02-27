@@ -5,14 +5,14 @@ members = [
     "crates/agent-web",
     "crates/agent-tools",
     "crates/agent-eval",
-    "crates/krust-mcp",
+    "crates/ember-mcp",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/abbudjoe/krust"
+repository = "https://github.com/abbudjoe/ember"
 description = "Verified execution protocols for AI agents"
 
 [workspace.dependencies]

@@ -5,8 +5,8 @@
 
 use crate::action::WebAction;
 use crate::backend::WebBackend;
-use krust_agent_tools::tool::{Tool, ToolCall, ToolResult};
-use krust_protocol_core::artifact::Evidence;
+use ember_agent_tools::tool::{Tool, ToolCall, ToolResult};
+use ember_protocol_core::artifact::Evidence;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -330,7 +330,7 @@ impl Tool for WebExtractTool {
 
 /// Register all web tools with a tool registry.
 pub fn register_web_tools(
-    registry: &mut krust_agent_tools::ToolRegistry,
+    registry: &mut ember_agent_tools::ToolRegistry,
     backend: Arc<dyn WebBackend>,
 ) {
     registry.register(Box::new(WebNavigateTool::new(backend.clone())));

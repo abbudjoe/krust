@@ -9,17 +9,17 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-DEFAULT_BINARY="$REPO_ROOT/target/release/krust-mcp"
+DEFAULT_BINARY="$REPO_ROOT/target/release/ember-mcp"
 BINARY_PATH="${KRUST_MCP_BINARY:-$DEFAULT_BINARY}"
-LAUNCHER_PATH="${KRUST_LAUNCHER_PATH:-$HOME/.local/bin/krust-mcp-launch}"
+LAUNCHER_PATH="${KRUST_LAUNCHER_PATH:-$HOME/.local/bin/ember-mcp-launch}"
 
-echo "== Krust Linux secret setup =="
-read -r -p "Path to krust-mcp binary [default: $BINARY_PATH] (press Enter to accept): " input_binary
+echo "== Ember Linux secret setup =="
+read -r -p "Path to ember-mcp binary [default: $BINARY_PATH] (press Enter to accept): " input_binary
 if [[ -n "${input_binary}" ]]; then
   BINARY_PATH="$input_binary"
 fi
 
-echo "Using krust-mcp binary: $BINARY_PATH"
+echo "Using ember-mcp binary: $BINARY_PATH"
 
 echo
 echo "Choose backend:"
@@ -35,8 +35,8 @@ if [[ "$sel" == "1" ]]; then
     exit 1
   fi
 
-  tiny_entry="${KRUST_TINYFISH_PASS_ENTRY:-krust/tinyfish_api_key}"
-  brave_entry="${KRUST_BRAVE_PASS_ENTRY:-krust/brave_api_key}"
+  tiny_entry="${KRUST_TINYFISH_PASS_ENTRY:-ember/tinyfish_api_key}"
+  brave_entry="${KRUST_BRAVE_PASS_ENTRY:-ember/brave_api_key}"
 
   echo
   read -r -p "Store TinyFish key now in pass entry '$tiny_entry'? [y/N]: " store_tiny
@@ -77,12 +77,12 @@ elif [[ "$sel" == "2" ]]; then
   echo
   read -r -p "Store TinyFish key now with secret-tool account '$tiny_account'? [y/N]: " store_tiny
   if [[ "${store_tiny,,}" == "y" ]]; then
-    secret-tool store --label='Krust TinyFish API Key' service krust account "$tiny_account"
+    secret-tool store --label='Ember TinyFish API Key' service ember account "$tiny_account"
   fi
 
   read -r -p "Store Brave key now with secret-tool account '$brave_account'? [y/N]: " store_brave
   if [[ "${store_brave,,}" == "y" ]]; then
-    secret-tool store --label='Krust Brave API Key' service krust account "$brave_account"
+    secret-tool store --label='Ember Brave API Key' service ember account "$brave_account"
   fi
 
   cat > "$LAUNCHER_PATH" <<EOF
@@ -90,10 +90,10 @@ elif [[ "$sel" == "2" ]]; then
 set -euo pipefail
 
 if command -v secret-tool >/dev/null 2>&1; then
-  if TINY_VALUE=\$(secret-tool lookup service krust account '$tiny_account' 2>/dev/null); then
+  if TINY_VALUE=\$(secret-tool lookup service ember account '$tiny_account' 2>/dev/null); then
     export TINYFISH_API_KEY="\$TINY_VALUE"
   fi
-  if BRAVE_VALUE=\$(secret-tool lookup service krust account '$brave_account' 2>/dev/null); then
+  if BRAVE_VALUE=\$(secret-tool lookup service ember account '$brave_account' 2>/dev/null); then
     export BRAVE_API_KEY="\$BRAVE_VALUE"
   fi
 fi

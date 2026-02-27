@@ -1,24 +1,24 @@
-//! # krust-mcp
+//! # ember-mcp
 //!
-//! MCP server that exposes Krust's verified execution tools to any
+//! MCP server that exposes Ember's verified execution tools to any
 //! MCP-compatible agent (Claude Code, Codex, Cursor, etc.).
 //!
 //! Usage:
-//!   cargo run --bin krust-mcp
+//!   cargo run --bin ember-mcp
 //!
 //! Then configure your agent's MCP settings to point at this binary.
 
-use krust_agent_web::action::{WaitCondition, WebAction};
-use krust_agent_web::backend::WebBackend;
-use krust_agent_web::cdp::{detect_chrome_path, CdpBackend};
-use krust_protocol_core::artifact::{
+use ember_agent_web::action::{WaitCondition, WebAction};
+use ember_agent_web::backend::WebBackend;
+use ember_agent_web::cdp::{detect_chrome_path, CdpBackend};
+use ember_protocol_core::artifact::{
     ArtifactContract, Evidence, RequiredEvidenceContract, VerificationResult,
 };
-use krust_protocol_core::intent::Intent;
-use krust_protocol_core::policy::{
+use ember_protocol_core::intent::Intent;
+use ember_protocol_core::policy::{
     evaluate_policies, AllowAllPolicy, ConfirmPatternPolicy, Policy, PolicyDecision,
 };
-use krust_protocol_core::state::{apply_transition, AgentState, TransitionEvent};
+use ember_protocol_core::state::{apply_transition, AgentState, TransitionEvent};
 use rmcp::service::RequestContext;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -418,7 +418,7 @@ struct PressKeyRequest {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct ScreenshotRequest {
     #[schemars(
-        description = "Optional file path to save screenshot. Defaults to /tmp/krust-screenshot-<timestamp>.png"
+        description = "Optional file path to save screenshot. Defaults to /tmp/ember-screenshot-<timestamp>.png"
     )]
     output_path: Option<String>,
 }
@@ -440,7 +440,7 @@ struct SearchRequest {
 // --- Server ---
 
 #[derive(Clone)]
-struct KrustServer {
+struct EmberServer {
     backend: Arc<CdpBackend>,
     launched: Arc<Mutex<bool>>,
     engine: Arc<ExecutionEngine>,
@@ -449,13 +449,13 @@ struct KrustServer {
     tool_router: ToolRouter<Self>,
 }
 
-impl std::fmt::Debug for KrustServer {
+impl std::fmt::Debug for EmberServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KrustServer").finish()
+        f.debug_struct("EmberServer").finish()
     }
 }
 
-impl KrustServer {
+impl EmberServer {
     fn new() -> Self {
         Self {
             backend: Arc::new(CdpBackend::new()),
@@ -483,7 +483,7 @@ impl KrustServer {
 }
 
 #[tool_router]
-impl KrustServer {
+impl EmberServer {
     #[tool(description = "Navigate the browser to a URL. Returns page title and URL.")]
     async fn web_navigate(&self, Parameters(req): Parameters<NavigateRequest>) -> String {
         if let Err(e) = self.ensure_browser().await {
@@ -833,11 +833,11 @@ impl KrustServer {
     }
 }
 
-impl ServerHandler for KrustServer {
+impl ServerHandler for EmberServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Krust: Verified execution protocols for AI agents. \
+                "Ember: Verified execution protocols for AI agents. \
                  This MCP server provides browser automation tools with \
                  state machine-backed execution and evidence verification."
                     .into(),
@@ -1012,7 +1012,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
-        println!("krust-mcp {}", env!("CARGO_PKG_VERSION"));
+        println!("ember-mcp {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
@@ -1034,7 +1034,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .init();
 
-    tracing::info!("Krust MCP server v{}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("Ember MCP server v{}", env!("CARGO_PKG_VERSION"));
     tracing::info!(
         "Headless: {}",
         std::env::var("KRUST_HEADLESS")
@@ -1051,13 +1051,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     }
 
-    let server = KrustServer::new();
+    let server = EmberServer::new();
     let transport = rmcp::transport::io::stdio();
     let service = server.serve(transport).await?;
 
-    tracing::info!("Krust MCP server initialized, waiting for requests");
+    tracing::info!("Ember MCP server initialized, waiting for requests");
     service.waiting().await?;
-    tracing::info!("Krust MCP server shutting down");
+    tracing::info!("Ember MCP server shutting down");
 
     Ok(())
 }
@@ -1339,7 +1339,7 @@ mod tests {
     async fn test_mcp_list_tools_exposes_expected_tools() {
         let (server_transport, client_transport) = tokio::io::duplex(4096);
 
-        let server = KrustServer::new();
+        let server = EmberServer::new();
         let server_handle = tokio::spawn(async move {
             let running = server
                 .serve(server_transport)
@@ -1389,7 +1389,7 @@ mod tests {
     async fn test_mcp_call_tool_dispatches_and_validates_parameters() {
         let (server_transport, client_transport) = tokio::io::duplex(4096);
 
-        let server = KrustServer::new();
+        let server = EmberServer::new();
         let server_handle = tokio::spawn(async move {
             let running = server
                 .serve(server_transport)
@@ -1434,7 +1434,7 @@ mod tests {
     async fn test_mcp_unknown_tool_returns_expected_error_shape() {
         let (server_transport, client_transport) = tokio::io::duplex(4096);
 
-        let server = KrustServer::new();
+        let server = EmberServer::new();
         let server_handle = tokio::spawn(async move {
             let running = server
                 .serve(server_transport)

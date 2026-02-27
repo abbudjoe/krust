@@ -9,19 +9,19 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-DEFAULT_BINARY="$REPO_ROOT/target/release/krust-mcp"
+DEFAULT_BINARY="$REPO_ROOT/target/release/ember-mcp"
 BINARY_PATH="${KRUST_MCP_BINARY:-$DEFAULT_BINARY}"
-LAUNCHER_PATH="${KRUST_LAUNCHER_PATH:-$HOME/bin/krust-mcp-launch}"
-DEFAULT_TINY_REF="op://Private/Krust API Keys/tinyfish"
-DEFAULT_BRAVE_REF="op://Private/Krust API Keys/brave"
+LAUNCHER_PATH="${KRUST_LAUNCHER_PATH:-$HOME/bin/ember-mcp-launch}"
+DEFAULT_TINY_REF="op://Private/Ember API Keys/tinyfish"
+DEFAULT_BRAVE_REF="op://Private/Ember API Keys/brave"
 
-echo "== Krust 1Password setup =="
-read -r -p "Path to krust-mcp binary [default: $BINARY_PATH] (press Enter to accept): " input_binary
+echo "== Ember 1Password setup =="
+read -r -p "Path to ember-mcp binary [default: $BINARY_PATH] (press Enter to accept): " input_binary
 if [[ -n "${input_binary}" ]]; then
   BINARY_PATH="$input_binary"
 fi
 
-echo "Using krust-mcp binary: $BINARY_PATH"
+echo "Using ember-mcp binary: $BINARY_PATH"
 
 read -r -p "TinyFish secret reference [$DEFAULT_TINY_REF]: " tiny_ref
 read -r -p "Brave secret reference [$DEFAULT_BRAVE_REF]: " brave_ref

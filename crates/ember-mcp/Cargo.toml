@@ -1,13 +1,13 @@
 [package]
-name = "krust-mcp"
+name = "ember-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "MCP server binary — expose Krust tools to any MCP-compatible agent"
+description = "MCP server binary — expose Ember tools to any MCP-compatible agent"
 
 [[bin]]
-name = "krust-mcp"
+name = "ember-mcp"
 path = "src/main.rs"
 
 [dependencies]
@@ -21,6 +21,6 @@ rmcp = { workspace = true, features = ["server", "client", "transport-io"] }
 schemars = { workspace = true }
 reqwest = { workspace = true }
 urlencoding = { workspace = true }
-krust-protocol-core = { path = "../protocol-core" }
-krust-agent-web = { path = "../agent-web" }
-krust-agent-tools = { path = "../agent-tools" }
+ember-protocol-core = { path = "../protocol-core" }
+ember-agent-web = { path = "../agent-web" }
+ember-agent-tools = { path = "../agent-tools" }
