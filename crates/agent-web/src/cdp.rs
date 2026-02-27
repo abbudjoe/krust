@@ -286,7 +286,7 @@ impl WebBackend for CdpBackend {
                     p
                 } else {
                     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-                    format!("/tmp/krust-screenshot-{}.png", ts)
+                    format!("/tmp/ember-screenshot-{}.png", ts)
                 };
 
                 tokio::fs::write(&path, &bytes)

@@ -14,24 +14,24 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-DEFAULT_BINARY="$REPO_ROOT/target/release/krust-mcp"
+DEFAULT_BINARY="$REPO_ROOT/target/release/ember-mcp"
 BINARY_PATH="${KRUST_MCP_BINARY:-$DEFAULT_BINARY}"
-LAUNCHER_PATH="${KRUST_LAUNCHER_PATH:-$HOME/bin/krust-mcp-launch}"
-TINY_SERVICE="${KRUST_TINYFISH_SERVICE:-krust_tinyfish_api_key}"
-BRAVE_SERVICE="${KRUST_BRAVE_SERVICE:-krust_brave_api_key}"
+LAUNCHER_PATH="${KRUST_LAUNCHER_PATH:-$HOME/bin/ember-mcp-launch}"
+TINY_SERVICE="${KRUST_TINYFISH_SERVICE:-ember_tinyfish_api_key}"
+BRAVE_SERVICE="${KRUST_BRAVE_SERVICE:-ember_brave_api_key}"
 
-echo "== Krust macOS Keychain setup =="
+echo "== Ember macOS Keychain setup =="
 echo
-read -r -p "Path to krust-mcp binary [default: $BINARY_PATH] (press Enter to accept): " input_binary
+read -r -p "Path to ember-mcp binary [default: $BINARY_PATH] (press Enter to accept): " input_binary
 if [[ -n "${input_binary}" ]]; then
   BINARY_PATH="$input_binary"
 fi
 
-echo "Using krust-mcp binary: $BINARY_PATH"
+echo "Using ember-mcp binary: $BINARY_PATH"
 
 if [[ ! -x "$BINARY_PATH" ]]; then
   echo "Warning: binary not executable at: $BINARY_PATH" >&2
-  echo "Build it first with: cargo build --release --bin krust-mcp" >&2
+  echo "Build it first with: cargo build --release --bin ember-mcp" >&2
 fi
 
 echo

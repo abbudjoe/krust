@@ -1,6 +1,6 @@
 //! Core tool trait and types.
 
-use krust_protocol_core::artifact::Evidence;
+use ember_protocol_core::artifact::Evidence;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

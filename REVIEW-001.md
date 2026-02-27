@@ -1,4 +1,4 @@
-# Krust Code Review — Day-One Architecture Audit (Opus)
+# Ember Code Review — Day-One Architecture Audit (Opus)
 
 ## Blocking Issues
 

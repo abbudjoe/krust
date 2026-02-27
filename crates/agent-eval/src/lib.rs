@@ -1,4 +1,4 @@
-//! # krust-agent-eval
+//! # ember-agent-eval
 //!
 //! Evaluation harness and reliability metrics.
 //!

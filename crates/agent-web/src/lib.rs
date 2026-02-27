@@ -1,4 +1,4 @@
-//! # krust-agent-web
+//! # ember-agent-web
 //!
 //! Web interaction abstractions for AI agents. Backend-agnostic.
 //!

@@ -1,6 +1,6 @@
-# ENGINEERING.md — Code Standards (Citros + Krust)
+# ENGINEERING.md — Code Standards (Citros + Ember)
 
-Effective 2026-02-26. These standards apply to all work in `abbudjoe/citros` and `abbudjoe/krust`.
+Effective 2026-02-26. These standards apply to all work in `abbudjoe/citros` and `abbudjoe/ember`.
 
 ---
 
@@ -25,15 +25,15 @@ citros/
 └── .github/         ← CI, templates
 ```
 
-### Krust repo structure (target)
+### Ember repo structure (target)
 ```
-stateful-protocols/  (or krust/)
+stateful-protocols/  (or ember/)
 ├── crates/
 │   ├── protocol-core/
 │   ├── agent-web/
 │   ├── agent-tools/
 │   ├── agent-eval/
-│   └── krust-mcp/
+│   └── ember-mcp/
 ├── docs/
 ├── scripts/
 └── .github/

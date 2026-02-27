@@ -1,4 +1,4 @@
-//! # krust-agent-tools
+//! # ember-agent-tools
 //!
 //! Tool framework bridging protocol-core with actual capabilities.
 //!

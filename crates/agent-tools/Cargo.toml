@@ -1,5 +1,5 @@
 [package]
-name = "krust-agent-tools"
+name = "ember-agent-tools"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,4 +13,4 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
-krust-protocol-core = { path = "../protocol-core" }
+ember-protocol-core = { path = "../protocol-core" }
